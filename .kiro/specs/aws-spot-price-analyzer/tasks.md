@@ -14,7 +14,7 @@
   - Write unit tests for data model validation using pytest
   - _Requirements: 1.4, 4.1, 4.2, 4.4_
 
-- [ ] 3. Create AWS Bedrock AgentCore service wrapper
+- [x] 3. Create AWS Bedrock AgentCore service wrapper
   - Implement BedrockAgentService class with boto3 and AgentCore SDK
   - Create methods for executing web scraping instructions via AgentCore
   - Add HTML content parsing functionality for spot price data extraction
