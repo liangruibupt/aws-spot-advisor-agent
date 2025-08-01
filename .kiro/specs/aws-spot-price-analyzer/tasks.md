@@ -21,7 +21,7 @@
   - Write unit tests with mocked AWS Bedrock responses using moto
   - _Requirements: 2.2_
 
-- [ ] 4. Implement web scraping service
+- [x] 4. Implement web scraping service
   - Create WebScraperService class that uses BedrockAgentService
   - Implement scrape_spot_data method to fetch data from AWS Spot Instance Advisor
   - Add data freshness checking with 1-hour cache validation using datetime
