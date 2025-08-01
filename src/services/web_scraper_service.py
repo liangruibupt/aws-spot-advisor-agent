@@ -3,8 +3,6 @@ Web scraping service for AWS Spot Instance Advisor.
 
 This module provides web scraping functionality using the BedrockAgentService
 to fetch and parse spot pricing data from the AWS EC2 Spot Instance Advisor.
-
-Hook test: This comment was added to test agent hook functionality.
 """
 
 import logging
