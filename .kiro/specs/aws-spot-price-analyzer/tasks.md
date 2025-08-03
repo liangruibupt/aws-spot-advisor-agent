@@ -28,14 +28,14 @@
   - Write unit tests for scraping logic with mock data and responses
   - _Requirements: 2.1, 2.3_
 
-- [ ] 5. Build data filtering service
+- [x] 5. Build data filtering service
   - Implement DataFilterService class with interruption rate filtering
   - Create filter_by_interruption_rate method to exclude regions >= 5%
   - Add validate_price_data method to ensure data completeness
   - Write unit tests for filtering logic with various data scenarios
   - _Requirements: 3.1, 3.2, 3.3_
 
-- [ ] 6. Create ranking and sorting engine
+- [x] 6. Create ranking and sorting engine
   - Implement RankingEngine class for price-based sorting
   - Add rank_by_price method with secondary sorting by interruption rate
   - Create get_top_regions method to return exactly 3 results
