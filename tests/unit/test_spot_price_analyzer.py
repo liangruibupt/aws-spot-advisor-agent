@@ -20,6 +20,7 @@ from src.models.spot_data import RawSpotData, SpotPriceResult, AnalysisResponse
 from src.services.web_scraper_service import WebScraperServiceError
 from src.services.data_filter_service import DataFilterServiceError
 from src.services.bedrock_agent_service import BedrockAgentServiceError
+from src.services.result_formatter import ResultFormatter
 
 
 class TestSpotPriceAnalyzer:
@@ -32,12 +33,14 @@ class TestSpotPriceAnalyzer:
         mock_web_scraper = Mock()
         mock_data_filter = Mock()
         mock_ranking_engine = Mock()
+        mock_result_formatter = Mock()
         
         return {
             'bedrock': mock_bedrock,
             'web_scraper': mock_web_scraper,
             'data_filter': mock_data_filter,
-            'ranking_engine': mock_ranking_engine
+            'ranking_engine': mock_ranking_engine,
+            'result_formatter': mock_result_formatter
         }
 
     @pytest.fixture
@@ -47,7 +50,8 @@ class TestSpotPriceAnalyzer:
             web_scraper=mock_services['web_scraper'],
             data_filter=mock_services['data_filter'],
             ranking_engine=mock_services['ranking_engine'],
-            bedrock_service=mock_services['bedrock']
+            bedrock_service=mock_services['bedrock'],
+            result_formatter=mock_services['result_formatter']
         )
 
     @pytest.fixture
@@ -625,3 +629,289 @@ class TestSpotPriceAnalyzerIntegration:
             
             assert "Failed to scrape spot data" in str(exc_info.value)
             assert "Network error" in str(exc_info.value)
+
+
+class TestSpotPriceAnalyzerJSONFormatting:
+    """Test cases for JSON formatting functionality in SpotPriceAnalyzer."""
+
+    @pytest.fixture
+    def mock_services(self):
+        """Create mock services for JSON formatting tests."""
+        mock_bedrock = Mock()
+        mock_web_scraper = Mock()
+        mock_data_filter = Mock()
+        mock_ranking_engine = Mock()
+        mock_result_formatter = Mock()
+        
+        return {
+            'bedrock': mock_bedrock,
+            'web_scraper': mock_web_scraper,
+            'data_filter': mock_data_filter,
+            'ranking_engine': mock_ranking_engine,
+            'result_formatter': mock_result_formatter
+        }
+
+    @pytest.fixture
+    def analyzer(self, mock_services):
+        """Create SpotPriceAnalyzer instance with mocked services."""
+        return SpotPriceAnalyzer(
+            web_scraper=mock_services['web_scraper'],
+            data_filter=mock_services['data_filter'],
+            ranking_engine=mock_services['ranking_engine'],
+            bedrock_service=mock_services['bedrock'],
+            result_formatter=mock_services['result_formatter']
+        )
+
+    @pytest.fixture
+    def sample_analysis_response(self):
+        """Create sample AnalysisResponse for testing."""
+        timestamp = datetime(2024, 1, 15, 10, 30, 45, tzinfo=timezone.utc)
+        
+        results = [
+            SpotPriceResult(
+                region="us-east-1",
+                instance_type="p5en.48xlarge",
+                spot_price=12.5678,
+                currency="USD",
+                interruption_rate=0.0234,
+                rank=1,
+                data_timestamp=timestamp
+            ),
+            SpotPriceResult(
+                region="us-west-2",
+                instance_type="p5.48xlarge",
+                spot_price=13.1234,
+                currency="USD",
+                interruption_rate=0.0456,
+                rank=2,
+                data_timestamp=timestamp
+            )
+        ]
+        
+        return AnalysisResponse(
+            results=results,
+            total_regions_analyzed=10,
+            filtered_regions_count=5,
+            data_collection_timestamp=timestamp,
+            warnings=["Test warning"]
+        )
+
+    def test_analyze_spot_prices_json_success(self, analyzer, mock_services, sample_analysis_response):
+        """Test successful JSON analysis response."""
+        # Mock the analyze_spot_prices method to return sample response
+        with patch.object(analyzer, 'analyze_spot_prices', return_value=sample_analysis_response):
+            # Mock the formatter
+            expected_formatted = {
+                "results": [{"region": "us-east-1", "price": 12.5678}],
+                "metadata": {"total": 10}
+            }
+            mock_services['result_formatter'].format_analysis_response.return_value = expected_formatted
+            
+            # Call the JSON method
+            result = analyzer.analyze_spot_prices_json(
+                instance_types=["p5en.48xlarge"],
+                max_interruption_rate=0.05,
+                top_count=3
+            )
+            
+            # Verify the formatter was called
+            mock_services['result_formatter'].format_analysis_response.assert_called_once_with(sample_analysis_response)
+            
+            # Verify the result
+            assert result == expected_formatted
+
+    def test_analyze_spot_prices_json_with_summary(self, analyzer, mock_services, sample_analysis_response):
+        """Test JSON analysis response with summary statistics."""
+        # Mock the analyze_spot_prices method
+        with patch.object(analyzer, 'analyze_spot_prices', return_value=sample_analysis_response):
+            # Mock the formatter methods
+            expected_formatted = {"results": [], "metadata": {}}
+            expected_summary = {"summary": "stats"}
+            
+            mock_services['result_formatter'].format_analysis_response.return_value = expected_formatted
+            mock_services['result_formatter'].format_summary_statistics.return_value = expected_summary
+            
+            # Call with summary enabled
+            result = analyzer.analyze_spot_prices_json(include_summary=True)
+            
+            # Verify both formatter methods were called
+            mock_services['result_formatter'].format_analysis_response.assert_called_once()
+            mock_services['result_formatter'].format_summary_statistics.assert_called_once_with(sample_analysis_response)
+            
+            # Verify summary was added
+            assert result["summary_statistics"] == expected_summary
+
+    def test_analyze_spot_prices_json_error_handling(self, analyzer, mock_services):
+        """Test JSON analysis response error handling."""
+        # Mock analyze_spot_prices to raise an exception
+        with patch.object(analyzer, 'analyze_spot_prices', side_effect=ServiceFailureError("Test error")):
+            # Mock the error formatter
+            expected_error = {"error": {"message": "Test error"}}
+            mock_services['result_formatter'].format_error_response.return_value = expected_error
+            
+            # Call the JSON method
+            result = analyzer.analyze_spot_prices_json()
+            
+            # Verify error formatter was called
+            mock_services['result_formatter'].format_error_response.assert_called_once()
+            
+            # Verify error response
+            assert result == expected_error
+
+    def test_analyze_spot_prices_json_string_success(self, analyzer, mock_services, sample_analysis_response):
+        """Test successful JSON string analysis response."""
+        # Mock the analyze_spot_prices_json method
+        expected_json_dict = {"results": [], "metadata": {}}
+        expected_json_string = '{"results": [], "metadata": {}}'
+        
+        with patch.object(analyzer, 'analyze_spot_prices_json', return_value=expected_json_dict):
+            mock_services['result_formatter'].to_json_string.return_value = expected_json_string
+            
+            # Call the JSON string method
+            result = analyzer.analyze_spot_prices_json_string(
+                instance_types=["p5en.48xlarge"],
+                indent=2
+            )
+            
+            # Verify the JSON conversion was called
+            mock_services['result_formatter'].to_json_string.assert_called_once_with(expected_json_dict, indent=2)
+            
+            # Verify the result
+            assert result == expected_json_string
+
+    def test_analyze_spot_prices_json_string_error_handling(self, analyzer, mock_services):
+        """Test JSON string analysis response error handling."""
+        # Mock analyze_spot_prices_json to raise an exception
+        with patch.object(analyzer, 'analyze_spot_prices_json', side_effect=Exception("Test error")):
+            # Mock the error formatter
+            expected_error = {"error": {"message": "Failed to generate JSON response: Test error"}}
+            expected_error_string = '{"error": {"message": "Failed to generate JSON response: Test error"}}'
+            
+            mock_services['result_formatter'].format_error_response.return_value = expected_error
+            mock_services['result_formatter'].to_json_string.return_value = expected_error_string
+            
+            # Call the JSON string method
+            result = analyzer.analyze_spot_prices_json_string()
+            
+            # Verify error handling
+            mock_services['result_formatter'].format_error_response.assert_called_once()
+            mock_services['result_formatter'].to_json_string.assert_called_once_with(expected_error, indent=None)
+            
+            # Verify error response
+            assert result == expected_error_string
+
+    def test_format_results_only_success(self, analyzer, mock_services):
+        """Test formatting results only without metadata."""
+        # Create sample results
+        timestamp = datetime(2024, 1, 15, 10, 30, 45, tzinfo=timezone.utc)
+        results = [
+            SpotPriceResult(
+                region="us-east-1",
+                instance_type="p5en.48xlarge",
+                spot_price=12.5678,
+                currency="USD",
+                interruption_rate=0.0234,
+                rank=1,
+                data_timestamp=timestamp
+            )
+        ]
+        
+        # Mock the formatter
+        expected_formatted_results = [{"region": "us-east-1", "price": 12.5678}]
+        mock_services['result_formatter'].format_spot_price_results.return_value = expected_formatted_results
+        
+        # Call the method
+        result = analyzer.format_results_only(results)
+        
+        # Verify the formatter was called
+        mock_services['result_formatter'].format_spot_price_results.assert_called_once_with(results)
+        
+        # Verify the result structure
+        assert result == {"results": expected_formatted_results}
+
+    def test_format_results_only_error_handling(self, analyzer, mock_services):
+        """Test error handling in format_results_only."""
+        # Create sample results
+        results = [Mock()]
+        
+        # Mock the formatter to raise an exception
+        mock_services['result_formatter'].format_spot_price_results.side_effect = Exception("Formatting error")
+        
+        # Mock the error formatter
+        expected_error = {"error": {"message": "Failed to format results: Formatting error"}}
+        mock_services['result_formatter'].format_error_response.return_value = expected_error
+        
+        # Call the method
+        result = analyzer.format_results_only(results)
+        
+        # Verify error handling
+        mock_services['result_formatter'].format_error_response.assert_called_once()
+        
+        # Verify error response
+        assert result == expected_error
+
+    def test_json_formatting_integration_with_real_formatter(self):
+        """Test JSON formatting integration with real ResultFormatter."""
+        # Create analyzer with real formatter
+        analyzer = SpotPriceAnalyzer()
+        
+        # Create sample data
+        timestamp = datetime(2024, 1, 15, 10, 30, 45, tzinfo=timezone.utc)
+        results = [
+            SpotPriceResult(
+                region="us-east-1",
+                instance_type="p5en.48xlarge",
+                spot_price=12.5678,
+                currency="USD",
+                interruption_rate=0.0234,
+                rank=1,
+                data_timestamp=timestamp
+            )
+        ]
+        
+        # Test format_results_only with real formatter
+        result = analyzer.format_results_only(results)
+        
+        # Verify structure
+        assert "results" in result
+        assert len(result["results"]) == 1
+        
+        # Verify formatting
+        formatted_result = result["results"][0]
+        assert formatted_result["region"] == "us-east-1"
+        assert formatted_result["instance_type"] == "p5en.48xlarge"
+        assert formatted_result["spot_price"]["amount"] == 12.5678
+        assert formatted_result["spot_price"]["currency"] == "USD"
+        assert formatted_result["interruption_rate"] == "2.34%"
+        assert formatted_result["rank"] == 1
+        assert formatted_result["data_timestamp"] == "2024-01-15T10:30:45+00:00"
+
+    def test_json_string_conversion_with_real_formatter(self):
+        """Test JSON string conversion with real ResultFormatter."""
+        # Create analyzer with real formatter
+        analyzer = SpotPriceAnalyzer()
+        
+        # Test data
+        test_data = {
+            "results": [
+                {
+                    "region": "us-east-1",
+                    "price": 12.34
+                }
+            ],
+            "metadata": {
+                "total": 1
+            }
+        }
+        
+        # Convert to JSON string
+        json_string = analyzer.result_formatter.to_json_string(test_data, indent=2)
+        
+        # Verify it's valid JSON
+        import json
+        parsed_back = json.loads(json_string)
+        assert parsed_back == test_data
+        
+        # Verify formatting (should have newlines due to indent)
+        assert "\n" in json_string
+        assert "  " in json_string  # Should have indentation

@@ -14,6 +14,7 @@ from src.services.web_scraper_service import WebScraperService, WebScraperServic
 from src.services.data_filter_service import DataFilterService, DataFilterServiceError
 from src.services.ranking_engine import RankingEngine
 from src.services.bedrock_agent_service import BedrockAgentService, BedrockAgentServiceError
+from src.services.result_formatter import ResultFormatter
 
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,8 @@ class SpotPriceAnalyzer:
         web_scraper: Optional[WebScraperService] = None,
         data_filter: Optional[DataFilterService] = None,
         ranking_engine: Optional[RankingEngine] = None,
-        bedrock_service: Optional[BedrockAgentService] = None
+        bedrock_service: Optional[BedrockAgentService] = None,
+        result_formatter: Optional[ResultFormatter] = None
     ):
         """
         Initialize the Spot Price Analyzer.
@@ -66,12 +68,14 @@ class SpotPriceAnalyzer:
             data_filter: DataFilterService instance (optional, will create if None)
             ranking_engine: RankingEngine instance (optional, will create if None)
             bedrock_service: BedrockAgentService instance (optional, will create if None)
+            result_formatter: ResultFormatter instance (optional, will create if None)
         """
         # Initialize services with dependency injection support
         self.bedrock_service = bedrock_service or BedrockAgentService()
         self.web_scraper = web_scraper or WebScraperService(self.bedrock_service)
         self.data_filter = data_filter or DataFilterService()
         self.ranking_engine = ranking_engine or RankingEngine()
+        self.result_formatter = result_formatter or ResultFormatter()
         
         # Analysis configuration
         self.max_interruption_rate = self.DEFAULT_MAX_INTERRUPTION_RATE
@@ -429,3 +433,133 @@ class SpotPriceAnalyzer:
             "valid": valid_types,
             "invalid": invalid_types
         }
+
+    def analyze_spot_prices_json(
+        self,
+        instance_types: Optional[List[str]] = None,
+        max_interruption_rate: Optional[float] = None,
+        top_count: int = 3,
+        force_refresh: bool = False,
+        include_summary: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Perform complete spot price analysis and return formatted JSON response.
+        
+        Args:
+            instance_types: List of instance types to analyze (optional)
+            max_interruption_rate: Maximum acceptable interruption rate (optional)
+            top_count: Number of top regions to return (default: 3)
+            force_refresh: Force refresh of cached data (default: False)
+            include_summary: Include summary statistics in response (default: False)
+            
+        Returns:
+            Dictionary ready for JSON serialization
+            
+        Raises:
+            SpotPriceAnalyzerError: If analysis fails
+            InsufficientRegionsError: If insufficient regions meet criteria
+            ServiceFailureError: If a dependent service fails
+        """
+        try:
+            # Perform the analysis
+            analysis_response = self.analyze_spot_prices(
+                instance_types=instance_types,
+                max_interruption_rate=max_interruption_rate,
+                top_count=top_count,
+                force_refresh=force_refresh
+            )
+            
+            # Format the response for JSON
+            formatted_response = self.result_formatter.format_analysis_response(analysis_response)
+            
+            # Add summary statistics if requested
+            if include_summary:
+                summary_stats = self.result_formatter.format_summary_statistics(analysis_response)
+                formatted_response["summary_statistics"] = summary_stats
+            
+            logger.info("Analysis response formatted for JSON output")
+            return formatted_response
+            
+        except Exception as e:
+            logger.error(f"Failed to generate JSON response: {e}")
+            # Return formatted error response
+            return self.result_formatter.format_error_response(
+                error_message=str(e),
+                error_code=type(e).__name__,
+                details={
+                    "instance_types": instance_types or self.instance_types,
+                    "max_interruption_rate": max_interruption_rate or self.max_interruption_rate,
+                    "top_count": top_count
+                }
+            )
+
+    def analyze_spot_prices_json_string(
+        self,
+        instance_types: Optional[List[str]] = None,
+        max_interruption_rate: Optional[float] = None,
+        top_count: int = 3,
+        force_refresh: bool = False,
+        include_summary: bool = False,
+        indent: Optional[int] = None
+    ) -> str:
+        """
+        Perform complete spot price analysis and return JSON string response.
+        
+        Args:
+            instance_types: List of instance types to analyze (optional)
+            max_interruption_rate: Maximum acceptable interruption rate (optional)
+            top_count: Number of top regions to return (default: 3)
+            force_refresh: Force refresh of cached data (default: False)
+            include_summary: Include summary statistics in response (default: False)
+            indent: Number of spaces for JSON indentation (None for compact)
+            
+        Returns:
+            JSON string representation of analysis results
+            
+        Raises:
+            SpotPriceAnalyzerError: If analysis or formatting fails
+        """
+        try:
+            # Get the formatted response
+            formatted_response = self.analyze_spot_prices_json(
+                instance_types=instance_types,
+                max_interruption_rate=max_interruption_rate,
+                top_count=top_count,
+                force_refresh=force_refresh,
+                include_summary=include_summary
+            )
+            
+            # Convert to JSON string
+            json_string = self.result_formatter.to_json_string(formatted_response, indent=indent)
+            
+            logger.info("Analysis response converted to JSON string")
+            return json_string
+            
+        except Exception as e:
+            logger.error(f"Failed to generate JSON string response: {e}")
+            # Return formatted error as JSON string
+            error_response = self.result_formatter.format_error_response(
+                error_message=f"Failed to generate JSON response: {e}",
+                error_code="JSON_FORMATTING_ERROR"
+            )
+            return self.result_formatter.to_json_string(error_response, indent=indent)
+
+    def format_results_only(self, results: List[SpotPriceResult]) -> Dict[str, Any]:
+        """
+        Format only the spot price results without metadata.
+        
+        Args:
+            results: List of SpotPriceResult objects to format
+            
+        Returns:
+            Dictionary with formatted results
+        """
+        try:
+            formatted_results = self.result_formatter.format_spot_price_results(results)
+            return {"results": formatted_results}
+        except Exception as e:
+            logger.error(f"Failed to format results: {e}")
+            return self.result_formatter.format_error_response(
+                error_message=f"Failed to format results: {e}",
+                error_code="RESULT_FORMATTING_ERROR"
+            )
