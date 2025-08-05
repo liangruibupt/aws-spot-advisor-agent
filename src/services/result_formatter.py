@@ -12,17 +12,21 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 from src.models.spot_data import SpotPriceResult, AnalysisResponse
+from src.utils.exceptions import FormattingError, DataValidationError
+from src.utils.error_middleware import handle_service_errors, create_error_mapping
+from src.utils.retry_utils import data_processing_retry
 
 
 logger = logging.getLogger(__name__)
 
 
-class ResultFormatterError(Exception):
+# Legacy exceptions for backward compatibility
+class ResultFormatterError(FormattingError):
     """Base exception for ResultFormatter errors."""
     pass
 
 
-class InvalidDataError(ResultFormatterError):
+class InvalidDataError(DataValidationError):
     """Raised when input data is invalid for formatting."""
     pass
 
@@ -36,12 +40,20 @@ class ResultFormatter:
     - Currency denomination (USD) formatting
     - Interruption rate formatting as percentages with 2 decimal places
     - Structured JSON output according to API requirements
+    - Enhanced error handling and validation
     """
 
     def __init__(self):
-        """Initialize the Result Formatter."""
-        logger.info("ResultFormatter initialized")
+        """Initialize the Result Formatter with error handling."""
+        self.error_mappings = create_error_mapping()
+        self.error_mappings.update({
+            json.JSONDecodeError: FormattingError,
+            UnicodeDecodeError: FormattingError,
+        })
+        logger.info("ResultFormatter initialized with enhanced error handling")
 
+    @handle_service_errors("result_formatter", "format_analysis_response")
+    @data_processing_retry(max_attempts=2)
     def format_analysis_response(self, response: AnalysisResponse) -> Dict[str, Any]:
         """
         Format an AnalysisResponse into a structured JSON-ready dictionary.
@@ -53,35 +65,37 @@ class ResultFormatter:
             Dictionary ready for JSON serialization
             
         Raises:
-            InvalidDataError: If response data is invalid
+            FormattingError: If response data is invalid or formatting fails
         """
-        try:
-            if not isinstance(response, AnalysisResponse):
-                raise InvalidDataError("Response must be an AnalysisResponse instance")
-            
-            logger.debug(f"Formatting analysis response with {len(response.results)} results")
-            
-            formatted_response = {
-                "results": [self._format_spot_price_result(result) for result in response.results],
-                "metadata": {
-                    "total_regions_analyzed": response.total_regions_analyzed,
-                    "filtered_regions_count": response.filtered_regions_count,
-                    "data_collection_timestamp": self._format_timestamp(response.data_collection_timestamp),
-                    "result_count": len(response.results)
-                }
+        if not isinstance(response, AnalysisResponse):
+            raise DataValidationError(
+                message="Response must be an AnalysisResponse instance",
+                field_name="response",
+                field_value=type(response).__name__,
+                validation_rule="must be AnalysisResponse"
+            )
+        
+        logger.debug(f"Formatting analysis response with {len(response.results)} results")
+        
+        formatted_response = {
+            "results": [self._format_spot_price_result(result) for result in response.results],
+            "metadata": {
+                "total_regions_analyzed": response.total_regions_analyzed,
+                "filtered_regions_count": response.filtered_regions_count,
+                "data_collection_timestamp": self._format_timestamp(response.data_collection_timestamp),
+                "result_count": len(response.results)
             }
-            
-            # Add warnings if present
-            if response.warnings:
-                formatted_response["warnings"] = response.warnings
-            
-            logger.debug("Analysis response formatted successfully")
-            return formatted_response
-            
-        except Exception as e:
-            logger.error(f"Failed to format analysis response: {e}")
-            raise InvalidDataError(f"Failed to format response: {e}")
+        }
+        
+        # Add warnings if present
+        if response.warnings:
+            formatted_response["warnings"] = response.warnings
+        
+        logger.debug("Analysis response formatted successfully")
+        return formatted_response
 
+    @handle_service_errors("result_formatter", "format_spot_price_results")
+    @data_processing_retry(max_attempts=2)
     def format_spot_price_results(self, results: List[SpotPriceResult]) -> List[Dict[str, Any]]:
         """
         Format a list of SpotPriceResult objects into JSON-ready dictionaries.
@@ -93,30 +107,33 @@ class ResultFormatter:
             List of dictionaries ready for JSON serialization
             
         Raises:
-            InvalidDataError: If results data is invalid
+            FormattingError: If results data is invalid or formatting fails
         """
-        try:
-            if not isinstance(results, list):
-                raise InvalidDataError("Results must be a list")
-            
-            logger.debug(f"Formatting {len(results)} spot price results")
-            
-            formatted_results = []
-            for i, result in enumerate(results):
-                try:
-                    formatted_result = self._format_spot_price_result(result)
-                    formatted_results.append(formatted_result)
-                except Exception as e:
-                    raise InvalidDataError(f"Failed to format result at index {i}: {e}")
-            
-            logger.debug("Spot price results formatted successfully")
-            return formatted_results
-            
-        except InvalidDataError:
-            raise
-        except Exception as e:
-            logger.error(f"Failed to format spot price results: {e}")
-            raise InvalidDataError(f"Failed to format results: {e}")
+        if not isinstance(results, list):
+            raise DataValidationError(
+                message="Results must be a list",
+                field_name="results",
+                field_value=type(results).__name__,
+                validation_rule="must be list"
+            )
+        
+        logger.debug(f"Formatting {len(results)} spot price results")
+        
+        formatted_results = []
+        for i, result in enumerate(results):
+            try:
+                formatted_result = self._format_spot_price_result(result)
+                formatted_results.append(formatted_result)
+            except Exception as e:
+                raise FormattingError(
+                    message=f"Failed to format result at index {i}: {e}",
+                    format_type="spot_price_result",
+                    data_type="SpotPriceResult",
+                    original_error=e
+                )
+        
+        logger.debug("Spot price results formatted successfully")
+        return formatted_results
 
     def _format_spot_price_result(self, result: SpotPriceResult) -> Dict[str, Any]:
         """
@@ -132,7 +149,12 @@ class ResultFormatter:
             InvalidDataError: If result data is invalid
         """
         if not isinstance(result, SpotPriceResult):
-            raise InvalidDataError("Result must be a SpotPriceResult instance")
+            raise DataValidationError(
+                message="Result must be a SpotPriceResult instance",
+                field_name="result",
+                field_value=type(result).__name__,
+                validation_rule="must be SpotPriceResult"
+            )
         
         return {
             "region": result.region,
@@ -158,10 +180,20 @@ class ResultFormatter:
             InvalidDataError: If price or currency is invalid
         """
         if not isinstance(price, (int, float)) or price < 0:
-            raise InvalidDataError("Price must be a non-negative number")
+            raise DataValidationError(
+                message="Price must be a non-negative number",
+                field_name="price",
+                field_value=price,
+                validation_rule="must be non-negative number"
+            )
         
         if currency != "USD":
-            raise InvalidDataError("Currency must be 'USD'")
+            raise DataValidationError(
+                message="Currency must be 'USD'",
+                field_name="currency",
+                field_value=currency,
+                validation_rule="must be 'USD'"
+            )
         
         return {
             "amount": round(price, 4),  # Round to 4 decimal places for precision
@@ -182,7 +214,12 @@ class ResultFormatter:
             InvalidDataError: If rate is invalid
         """
         if not isinstance(rate, (int, float)) or not (0 <= rate <= 1):
-            raise InvalidDataError("Interruption rate must be between 0 and 1")
+            raise DataValidationError(
+                message="Interruption rate must be between 0 and 1",
+                field_name="interruption_rate",
+                field_value=rate,
+                validation_rule="must be between 0 and 1"
+            )
         
         percentage = rate * 100
         return f"{percentage:.2f}%"
@@ -201,7 +238,12 @@ class ResultFormatter:
             InvalidDataError: If timestamp is invalid
         """
         if not isinstance(timestamp, datetime):
-            raise InvalidDataError("Timestamp must be a datetime object")
+            raise DataValidationError(
+                message="Timestamp must be a datetime object",
+                field_name="timestamp",
+                field_value=type(timestamp).__name__,
+                validation_rule="must be datetime"
+            )
         
         # Ensure timezone is UTC for consistency
         if timestamp.tzinfo is None:
@@ -275,7 +317,11 @@ class ResultFormatter:
             )
         except (TypeError, ValueError) as e:
             logger.error(f"Failed to serialize data to JSON: {e}")
-            raise InvalidDataError(f"Failed to serialize to JSON: {e}")
+            raise FormattingError(
+                message=f"Failed to serialize to JSON: {e}",
+                format_type="JSON",
+                original_error=e
+            )
 
     def format_summary_statistics(self, response: AnalysisResponse) -> Dict[str, Any]:
         """
@@ -288,7 +334,12 @@ class ResultFormatter:
             Dictionary with formatted summary statistics
         """
         if not isinstance(response, AnalysisResponse):
-            raise InvalidDataError("Response must be an AnalysisResponse instance")
+            raise DataValidationError(
+                message="Response must be an AnalysisResponse instance",
+                field_name="response",
+                field_value=type(response).__name__,
+                validation_rule="must be AnalysisResponse"
+            )
         
         # Calculate statistics
         prices = [result.spot_price for result in response.results]
@@ -348,11 +399,20 @@ class ResultFormatter:
         
         for field in required_fields:
             if field not in data:
-                raise InvalidDataError(f"Missing required field: {field}")
+                raise DataValidationError(
+                    message=f"Missing required field: {field}",
+                    field_name=field,
+                    validation_rule="required field"
+                )
         
         # Validate results structure
         if not isinstance(data["results"], list):
-            raise InvalidDataError("Results must be a list")
+            raise DataValidationError(
+                message="Results must be a list",
+                field_name="results",
+                field_value=type(data["results"]).__name__,
+                validation_rule="must be list"
+            )
         
         for i, result in enumerate(data["results"]):
             self._validate_result_structure(result, i)
@@ -372,14 +432,27 @@ class ResultFormatter:
         
         for field in required_result_fields:
             if field not in result:
-                raise InvalidDataError(f"Result at index {index} missing field: {field}")
+                raise DataValidationError(
+                    message=f"Result at index {index} missing field: {field}",
+                    field_name=field,
+                    validation_rule="required field"
+                )
         
         # Validate spot_price structure
         if not isinstance(result["spot_price"], dict):
-            raise InvalidDataError(f"Result at index {index}: spot_price must be a dictionary")
+            raise DataValidationError(
+                message=f"Result at index {index}: spot_price must be a dictionary",
+                field_name="spot_price",
+                field_value=type(result["spot_price"]).__name__,
+                validation_rule="must be dictionary"
+            )
         
         if "amount" not in result["spot_price"] or "currency" not in result["spot_price"]:
-            raise InvalidDataError(f"Result at index {index}: spot_price missing amount or currency")
+            raise DataValidationError(
+                message=f"Result at index {index}: spot_price missing amount or currency",
+                field_name="spot_price",
+                validation_rule="must contain amount and currency"
+            )
 
     def _validate_metadata_structure(self, metadata: Dict[str, Any]) -> None:
         """Validate metadata structure."""
@@ -390,4 +463,8 @@ class ResultFormatter:
         
         for field in required_metadata_fields:
             if field not in metadata:
-                raise InvalidDataError(f"Metadata missing field: {field}")
+                raise DataValidationError(
+                    message=f"Metadata missing field: {field}",
+                    field_name=field,
+                    validation_rule="required metadata field"
+                )
