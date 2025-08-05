@@ -19,13 +19,22 @@ from strands.agent.agent_result import AgentResult
 from strands_tools.http_request import http_request, extract_content_from_html
 
 from src.models.spot_data import RawSpotData
+from src.utils.exceptions import (
+    BedrockServiceError,
+    NetworkError,
+    ServiceUnavailableError,
+    RateLimitError,
+    DataValidationError
+)
+from src.utils.retry_utils import aws_service_retry, web_scraping_retry
 
 
 logger = logging.getLogger(__name__)
 
 
-class BedrockAgentServiceError(Exception):
-    """Base exception for BedrockAgentService errors."""
+# Keep the old exception for backward compatibility
+class BedrockAgentServiceError(BedrockServiceError):
+    """Legacy exception for BedrockAgentService errors."""
     pass
 
 
@@ -91,14 +100,30 @@ class BedrockAgentService:
                     model=f"bedrock:{self.model_name}",
                     tools=[http_request]
                 )
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+                logger.error(f"AWS client error creating Strands Agent: {e}")
+                raise BedrockServiceError(
+                    message=f"Failed to initialize Strands Agent: {e}",
+                    service_error_code=error_code,
+                    region=self.region_name,
+                    model_name=self.model_name,
+                    original_error=e
+                )
             except Exception as e:
                 logger.error(f"Failed to create Strands Agent: {e}")
-                raise BedrockAgentServiceError(f"Failed to initialize Strands Agent: {e}")
+                raise BedrockServiceError(
+                    message=f"Failed to initialize Strands Agent: {e}",
+                    region=self.region_name,
+                    model_name=self.model_name,
+                    original_error=e
+                )
         
         # At this point, self._agent is guaranteed to not be None
         assert self._agent is not None
         return self._agent
 
+    @aws_service_retry(max_attempts=3)
     def execute_web_scraping(self, url: str, custom_instructions: Optional[str] = None) -> str:
         """
         Execute web scraping using Strands Agent with HTTP request tool.
@@ -111,7 +136,10 @@ class BedrockAgentService:
             Raw HTML content or structured data from the agent
             
         Raises:
-            BedrockAgentServiceError: If scraping fails
+            BedrockServiceError: If scraping fails
+            NetworkError: If network issues occur
+            ServiceUnavailableError: If Bedrock service is unavailable
+            RateLimitError: If rate limits are exceeded
         """
         instructions = custom_instructions or self._scraping_instructions
         
@@ -135,7 +163,11 @@ class BedrockAgentService:
             response = agent(prompt)
             
             if not response or not response.message:
-                raise BedrockAgentServiceError("No response returned from agent")
+                raise BedrockServiceError(
+                    message="No response returned from agent",
+                    region=self.region_name,
+                    model_name=self.model_name
+                )
             
             # Extract text content from the response
             content = ""
@@ -145,17 +177,58 @@ class BedrockAgentService:
                         content += item['text']
             
             if not content:
-                raise BedrockAgentServiceError("No content extracted from agent response")
+                raise BedrockServiceError(
+                    message="No content extracted from agent response",
+                    region=self.region_name,
+                    model_name=self.model_name
+                )
             
             logger.info("Web scraping completed successfully")
             return content
             
         except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            status_code = e.response.get('ResponseMetadata', {}).get('HTTPStatusCode')
+            
             logger.error(f"AWS client error during scraping: {e}")
-            raise BedrockAgentServiceError(f"AWS service error: {e}")
+            
+            # Handle specific AWS error types
+            if error_code in ['Throttling', 'ThrottlingException', 'TooManyRequestsException']:
+                raise RateLimitError(
+                    message=f"Rate limit exceeded for Bedrock service: {e}",
+                    service_name="AWS Bedrock",
+                    original_error=e
+                )
+            elif error_code in ['ServiceUnavailable', 'InternalError']:
+                raise ServiceUnavailableError(
+                    message=f"Bedrock service unavailable: {e}",
+                    service_name="AWS Bedrock",
+                    status_code=status_code,
+                    original_error=e
+                )
+            else:
+                raise BedrockServiceError(
+                    message=f"AWS service error: {e}",
+                    service_error_code=error_code,
+                    region=self.region_name,
+                    model_name=self.model_name,
+                    original_error=e
+                )
+        except BotoCoreError as e:
+            logger.error(f"Boto core error during scraping: {e}")
+            raise NetworkError(
+                message=f"Network error during web scraping: {e}",
+                url=url,
+                original_error=e
+            )
         except Exception as e:
             logger.error(f"Unexpected error during web scraping: {e}")
-            raise BedrockAgentServiceError(f"Web scraping failed: {e}")
+            raise BedrockServiceError(
+                message=f"Web scraping failed: {e}",
+                region=self.region_name,
+                model_name=self.model_name,
+                original_error=e
+            )
 
     def parse_spot_data(self, content: str, instance_types: List[str]) -> List[RawSpotData]:
         """
@@ -169,10 +242,25 @@ class BedrockAgentService:
             List of RawSpotData objects
             
         Raises:
-            BedrockAgentServiceError: If parsing fails
+            BedrockServiceError: If parsing fails
+            DataValidationError: If data validation fails
         """
         try:
             logger.info("Parsing spot price data from scraped content")
+            
+            if not content or not content.strip():
+                raise DataValidationError(
+                    message="Empty content provided for parsing",
+                    field_name="content",
+                    field_value=content
+                )
+            
+            if not instance_types:
+                raise DataValidationError(
+                    message="No instance types provided for filtering",
+                    field_name="instance_types",
+                    field_value=instance_types
+                )
             
             # Try to parse as JSON first (structured response from agent)
             spot_data_list = []
@@ -191,9 +279,17 @@ class BedrockAgentService:
             logger.info(f"Successfully parsed {len(spot_data_list)} spot price records")
             return spot_data_list
             
+        except DataValidationError:
+            # Re-raise validation errors as-is
+            raise
         except Exception as e:
             logger.error(f"Error parsing spot data: {e}")
-            raise BedrockAgentServiceError(f"Failed to parse spot data: {e}")
+            raise BedrockServiceError(
+                message=f"Failed to parse spot data: {e}",
+                region=self.region_name,
+                model_name=self.model_name,
+                original_error=e
+            )
 
     def _parse_structured_data(self, regions_data: List[Dict[str, Any]], instance_types: List[str]) -> List[RawSpotData]:
         """
@@ -217,8 +313,9 @@ class BedrockAgentService:
                 
                 # Validate required fields
                 required_fields = ['region', 'instance_type', 'spot_price', 'interruption_rate']
-                if not all(field in region_data for field in required_fields):
-                    logger.warning(f"Missing required fields in region data: {region_data}")
+                missing_fields = [field for field in required_fields if field not in region_data]
+                if missing_fields:
+                    logger.warning(f"Missing required fields {missing_fields} in region data: {region_data}")
                     continue
                 
                 # Convert interruption rate from percentage to decimal if needed

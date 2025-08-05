@@ -10,13 +10,19 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 
 from src.models.spot_data import RawSpotData
+from src.utils.exceptions import (
+    DataFilteringError,
+    DataValidationError,
+    InsufficientDataError
+)
 
 
 logger = logging.getLogger(__name__)
 
 
-class DataFilterServiceError(Exception):
-    """Base exception for DataFilterService errors."""
+# Keep the old exception for backward compatibility
+class DataFilterServiceError(DataFilteringError):
+    """Legacy exception for DataFilterService errors."""
     pass
 
 

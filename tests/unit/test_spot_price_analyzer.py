@@ -16,6 +16,10 @@ from src.services.spot_price_analyzer import (
     InsufficientRegionsError,
     ServiceFailureError
 )
+from src.utils.exceptions import (
+    InsufficientDataError,
+    ConfigurationError
+)
 from src.models.spot_data import RawSpotData, SpotPriceResult, AnalysisResponse
 from src.services.web_scraper_service import WebScraperServiceError
 from src.services.data_filter_service import DataFilterServiceError
@@ -267,7 +271,7 @@ class TestSpotPriceAnalyzer:
         mock_services['data_filter'].filter_and_validate.return_value = []
         
         # Execute and verify error
-        with pytest.raises(InsufficientRegionsError) as exc_info:
+        with pytest.raises(InsufficientDataError) as exc_info:
             analyzer.analyze_spot_prices()
         
         assert "No regions meet the criteria" in str(exc_info.value)
@@ -360,24 +364,24 @@ class TestSpotPriceAnalyzer:
         mock_services['web_scraper'].get_supported_instance_types.return_value = ["p5en.48xlarge", "p5.48xlarge"]
         
         # Test empty list
-        with pytest.raises(SpotPriceAnalyzerError) as exc_info:
+        with pytest.raises(ConfigurationError) as exc_info:
             analyzer.update_configuration(instance_types=[])
         assert "non-empty list" in str(exc_info.value)
         
         # Test unsupported types
-        with pytest.raises(SpotPriceAnalyzerError) as exc_info:
+        with pytest.raises(ConfigurationError) as exc_info:
             analyzer.update_configuration(instance_types=["invalid.type"])
         assert "Unsupported instance types" in str(exc_info.value)
 
     def test_update_configuration_invalid_interruption_rate(self, analyzer):
         """Test updating configuration with invalid interruption rate."""
         # Test negative rate
-        with pytest.raises(SpotPriceAnalyzerError) as exc_info:
+        with pytest.raises(ConfigurationError) as exc_info:
             analyzer.update_configuration(max_interruption_rate=-0.1)
         assert "between 0.0 and 1.0" in str(exc_info.value)
         
         # Test rate > 1.0
-        with pytest.raises(SpotPriceAnalyzerError) as exc_info:
+        with pytest.raises(ConfigurationError) as exc_info:
             analyzer.update_configuration(max_interruption_rate=1.5)
         assert "between 0.0 and 1.0" in str(exc_info.value)
 
@@ -473,7 +477,7 @@ class TestSpotPriceAnalyzer:
 
     def test_validate_sufficient_regions_no_regions(self, analyzer):
         """Test region validation with no regions."""
-        with pytest.raises(InsufficientRegionsError) as exc_info:
+        with pytest.raises(InsufficientDataError) as exc_info:
             analyzer._validate_sufficient_regions([], 3)
         
         assert "No regions meet the criteria" in str(exc_info.value)
@@ -746,14 +750,14 @@ class TestSpotPriceAnalyzerJSONFormatting:
         # Mock analyze_spot_prices to raise an exception
         with patch.object(analyzer, 'analyze_spot_prices', side_effect=ServiceFailureError("Test error")):
             # Mock the error formatter
-            expected_error = {"error": {"message": "Test error"}}
-            mock_services['result_formatter'].format_error_response.return_value = expected_error
-            
-            # Call the JSON method
-            result = analyzer.analyze_spot_prices_json()
-            
-            # Verify error formatter was called
-            mock_services['result_formatter'].format_error_response.assert_called_once()
+            expected_error = {"error": True, "message": "Test error"}
+            with patch.object(analyzer.error_formatter, 'format_error_response', return_value=expected_error) as mock_error_formatter:
+                
+                # Call the JSON method
+                result = analyzer.analyze_spot_prices_json()
+                
+                # Verify error formatter was called
+                mock_error_formatter.assert_called_once()
             
             # Verify error response
             assert result == expected_error
@@ -784,17 +788,17 @@ class TestSpotPriceAnalyzerJSONFormatting:
         # Mock analyze_spot_prices_json to raise an exception
         with patch.object(analyzer, 'analyze_spot_prices_json', side_effect=Exception("Test error")):
             # Mock the error formatter
-            expected_error = {"error": {"message": "Failed to generate JSON response: Test error"}}
-            expected_error_string = '{"error": {"message": "Failed to generate JSON response: Test error"}}'
+            expected_error = {"error": True, "message": "Failed to generate JSON response: Test error"}
+            expected_error_string = '{"error": true, "message": "Failed to generate JSON response: Test error"}'
             
-            mock_services['result_formatter'].format_error_response.return_value = expected_error
-            mock_services['result_formatter'].to_json_string.return_value = expected_error_string
-            
-            # Call the JSON string method
-            result = analyzer.analyze_spot_prices_json_string()
-            
-            # Verify error handling
-            mock_services['result_formatter'].format_error_response.assert_called_once()
+            with patch.object(analyzer.error_formatter, 'format_error_response', return_value=expected_error) as mock_error_formatter:
+                with patch.object(analyzer.error_formatter, 'to_json_string', return_value=expected_error_string) as mock_to_json:
+                    
+                    # Call the JSON string method
+                    result = analyzer.analyze_spot_prices_json_string()
+                    
+                    # Verify error handling
+                    mock_error_formatter.assert_called_once()
             mock_services['result_formatter'].to_json_string.assert_called_once_with(expected_error, indent=None)
             
             # Verify error response
@@ -838,17 +842,17 @@ class TestSpotPriceAnalyzerJSONFormatting:
         mock_services['result_formatter'].format_spot_price_results.side_effect = Exception("Formatting error")
         
         # Mock the error formatter
-        expected_error = {"error": {"message": "Failed to format results: Formatting error"}}
-        mock_services['result_formatter'].format_error_response.return_value = expected_error
-        
-        # Call the method
-        result = analyzer.format_results_only(results)
-        
-        # Verify error handling
-        mock_services['result_formatter'].format_error_response.assert_called_once()
-        
-        # Verify error response
-        assert result == expected_error
+        expected_error = {"error": True, "message": "Failed to format results: Formatting error"}
+        with patch.object(analyzer.error_formatter, 'format_error_response', return_value=expected_error) as mock_error_formatter:
+            
+            # Call the method
+            result = analyzer.format_results_only(results)
+            
+            # Verify error handling
+            mock_error_formatter.assert_called_once()
+            
+            # Verify error response
+            assert result == expected_error
 
     def test_json_formatting_integration_with_real_formatter(self):
         """Test JSON formatting integration with real ResultFormatter."""

@@ -12,13 +12,23 @@ from urllib.parse import urlparse
 
 from src.services.bedrock_agent_service import BedrockAgentService, BedrockAgentServiceError
 from src.models.spot_data import RawSpotData
+from src.utils.exceptions import (
+    WebScrapingError,
+    BedrockServiceError,
+    DataValidationError,
+    CacheError,
+    NetworkError,
+    ServiceUnavailableError
+)
+from src.utils.retry_utils import web_scraping_retry
 
 
 logger = logging.getLogger(__name__)
 
 
-class WebScraperServiceError(Exception):
-    """Base exception for WebScraperService errors."""
+# Keep the old exception for backward compatibility
+class WebScraperServiceError(WebScrapingError):
+    """Legacy exception for WebScraperService errors."""
     pass
 
 
@@ -57,6 +67,7 @@ class WebScraperService:
         # Supported instance types
         self.supported_instance_types = ["p5en.48xlarge", "p5.48xlarge"]
 
+    @web_scraping_retry(max_attempts=3)
     def scrape_spot_data(
         self,
         instance_types: Optional[List[str]] = None,
@@ -73,19 +84,34 @@ class WebScraperService:
             List of RawSpotData objects containing spot pricing information
             
         Raises:
-            WebScraperServiceError: If scraping fails
+            WebScrapingError: If scraping fails
+            DataValidationError: If input validation fails
+            CacheError: If cache operations fail
         """
         if instance_types is None:
             instance_types = self.supported_instance_types.copy()
         
         # Validate instance types
+        if not isinstance(instance_types, list):
+            raise DataValidationError(
+                message="Instance types must be a list",
+                field_name="instance_types",
+                field_value=instance_types,
+                validation_rule="must be list"
+            )
+        
         invalid_types = [t for t in instance_types if t not in self.supported_instance_types]
         if invalid_types:
             logger.warning(f"Unsupported instance types requested: {invalid_types}")
             instance_types = [t for t in instance_types if t in self.supported_instance_types]
         
         if not instance_types:
-            raise WebScraperServiceError("No valid instance types specified")
+            raise DataValidationError(
+                message="No valid instance types specified",
+                field_name="instance_types",
+                field_value=instance_types,
+                validation_rule="must contain supported instance types"
+            )
         
         try:
             logger.info(f"Starting spot data scraping for instance types: {instance_types}")
@@ -94,8 +120,17 @@ class WebScraperService:
             cache_key = self._get_cache_key(instance_types)
             if not force_refresh and self._is_cache_valid(cache_key):
                 logger.info("Returning cached spot data")
-                cached_data: List[RawSpotData] = self._cache[cache_key]["data"]
-                return cached_data
+                try:
+                    cached_data: List[RawSpotData] = self._cache[cache_key]["data"]
+                    return cached_data
+                except KeyError as e:
+                    logger.warning(f"Cache key error: {e}")
+                    raise CacheError(
+                        message=f"Failed to retrieve cached data: {e}",
+                        cache_key=cache_key,
+                        operation="retrieve",
+                        original_error=e
+                    )
             
             # Scrape fresh data
             raw_content = self._fetch_web_content()
@@ -107,12 +142,23 @@ class WebScraperService:
             logger.info(f"Successfully scraped {len(spot_data)} spot price records")
             return spot_data
             
-        except BedrockAgentServiceError as e:
+        except (DataValidationError, CacheError):
+            # Re-raise validation and cache errors as-is
+            raise
+        except (BedrockAgentServiceError, BedrockServiceError) as e:
             logger.error(f"Bedrock service error during scraping: {e}")
-            raise WebScraperServiceError(f"Failed to scrape spot data: {e}")
+            raise WebScrapingError(
+                message=f"Failed to scrape spot data: {e}",
+                url=self.SPOT_ADVISOR_URL,
+                original_error=e
+            )
         except Exception as e:
             logger.error(f"Unexpected error during scraping: {e}")
-            raise WebScraperServiceError(f"Scraping failed: {e}")
+            raise WebScrapingError(
+                message=f"Scraping failed: {e}",
+                url=self.SPOT_ADVISOR_URL,
+                original_error=e
+            )
 
     def is_data_fresh(self, timestamp: datetime, max_age_hours: float = 1.0) -> bool:
         """
@@ -182,7 +228,9 @@ class WebScraperService:
             Raw web content as string
             
         Raises:
-            WebScraperServiceError: If fetching fails
+            WebScrapingError: If fetching fails
+            NetworkError: If network issues occur
+            ServiceUnavailableError: If service is unavailable
         """
         try:
             logger.info(f"Fetching content from {self.SPOT_ADVISOR_URL}")
@@ -191,14 +239,24 @@ class WebScraperService:
             content = self.bedrock_service.execute_web_scraping(self.SPOT_ADVISOR_URL)
             
             if not content:
-                raise WebScraperServiceError("No content returned from web scraping")
+                raise WebScrapingError(
+                    message="No content returned from web scraping",
+                    url=self.SPOT_ADVISOR_URL
+                )
             
             logger.debug(f"Fetched {len(content)} characters of content")
             return content
             
-        except BedrockAgentServiceError as e:
+        except (NetworkError, ServiceUnavailableError):
+            # Re-raise network and service errors as-is
+            raise
+        except (BedrockAgentServiceError, BedrockServiceError) as e:
             logger.error(f"Failed to fetch web content: {e}")
-            raise WebScraperServiceError(f"Web content fetch failed: {e}")
+            raise WebScrapingError(
+                message=f"Web content fetch failed: {e}",
+                url=self.SPOT_ADVISOR_URL,
+                original_error=e
+            )
 
     def _parse_spot_data(self, content: str, instance_types: List[str]) -> List[RawSpotData]:
         """
@@ -212,7 +270,8 @@ class WebScraperService:
             List of RawSpotData objects
             
         Raises:
-            WebScraperServiceError: If parsing fails
+            WebScrapingError: If parsing fails
+            DataValidationError: If data validation fails
         """
         try:
             logger.info("Parsing spot data from web content")
@@ -226,18 +285,35 @@ class WebScraperService:
             
             # Validate and filter the data
             valid_data = []
+            invalid_count = 0
+            
             for data in spot_data:
-                if self._validate_spot_data(data):
-                    valid_data.append(data)
-                else:
-                    logger.warning(f"Invalid spot data filtered out: {data.region}")
+                try:
+                    if self._validate_spot_data(data):
+                        valid_data.append(data)
+                    else:
+                        invalid_count += 1
+                        logger.warning(f"Invalid spot data filtered out: {data.region}")
+                except Exception as e:
+                    invalid_count += 1
+                    logger.warning(f"Error validating spot data for {getattr(data, 'region', 'unknown')}: {e}")
+            
+            if invalid_count > 0:
+                logger.info(f"Filtered out {invalid_count} invalid records")
             
             logger.info(f"Parsed {len(valid_data)} valid spot price records")
             return valid_data
             
-        except BedrockAgentServiceError as e:
+        except DataValidationError:
+            # Re-raise validation errors as-is
+            raise
+        except (BedrockAgentServiceError, BedrockServiceError) as e:
             logger.error(f"Failed to parse spot data: {e}")
-            raise WebScraperServiceError(f"Spot data parsing failed: {e}")
+            raise WebScrapingError(
+                message=f"Spot data parsing failed: {e}",
+                url=self.SPOT_ADVISOR_URL,
+                original_error=e
+            )
 
     def _validate_spot_data(self, data: RawSpotData) -> bool:
         """
@@ -317,13 +393,26 @@ class WebScraperService:
         Args:
             cache_key: Cache key
             data: Spot data to cache
+            
+        Raises:
+            CacheError: If cache update fails
         """
-        self._cache[cache_key] = {
-            "timestamp": datetime.now(timezone.utc),
-            "data": data
-        }
-        
-        logger.debug(f"Updated cache for key: {cache_key}")
+        try:
+            self._cache[cache_key] = {
+                "timestamp": datetime.now(timezone.utc),
+                "data": data
+            }
+            
+            logger.debug(f"Updated cache for key: {cache_key}")
+            
+        except Exception as e:
+            logger.error(f"Failed to update cache for key {cache_key}: {e}")
+            raise CacheError(
+                message=f"Failed to update cache: {e}",
+                cache_key=cache_key,
+                operation="update",
+                original_error=e
+            )
 
     def get_supported_instance_types(self) -> List[str]:
         """

@@ -15,22 +15,33 @@ from src.services.data_filter_service import DataFilterService, DataFilterServic
 from src.services.ranking_engine import RankingEngine
 from src.services.bedrock_agent_service import BedrockAgentService, BedrockAgentServiceError
 from src.services.result_formatter import ResultFormatter
+from src.utils.exceptions import (
+    SpotAnalyzerBaseError,
+    InsufficientDataError,
+    ConfigurationError,
+    RankingError,
+    FormattingError,
+    RetryableError
+)
+from src.utils.error_response import ErrorResponseFormatter
+from src.utils.retry_utils import data_processing_retry
 
 
 logger = logging.getLogger(__name__)
 
 
-class SpotPriceAnalyzerError(Exception):
+# Legacy exceptions for backward compatibility
+class SpotPriceAnalyzerError(SpotAnalyzerBaseError):
     """Base exception for SpotPriceAnalyzer errors."""
     pass
 
 
-class InsufficientRegionsError(SpotPriceAnalyzerError):
+class InsufficientRegionsError(InsufficientDataError):
     """Raised when insufficient regions meet the criteria."""
     pass
 
 
-class ServiceFailureError(SpotPriceAnalyzerError):
+class ServiceFailureError(SpotAnalyzerBaseError):
     """Raised when a dependent service fails."""
     pass
 
@@ -77,12 +88,16 @@ class SpotPriceAnalyzer:
         self.ranking_engine = ranking_engine or RankingEngine()
         self.result_formatter = result_formatter or ResultFormatter()
         
+        # Initialize error response formatter
+        self.error_formatter = ErrorResponseFormatter()
+        
         # Analysis configuration
         self.max_interruption_rate = self.DEFAULT_MAX_INTERRUPTION_RATE
         self.instance_types = self.DEFAULT_INSTANCE_TYPES.copy()
         
         logger.info("SpotPriceAnalyzer initialized")
 
+    @data_processing_retry(max_attempts=2)
     def analyze_spot_prices(
         self,
         instance_types: Optional[List[str]] = None,
@@ -152,14 +167,29 @@ class SpotPriceAnalyzer:
             
         except (WebScraperServiceError, BedrockAgentServiceError) as e:
             logger.error(f"Service failure during analysis: {e}")
-            raise ServiceFailureError(f"Web scraping service failed: {e}")
+            raise ServiceFailureError(
+                message=f"Web scraping service failed: {e}",
+                details={
+                    "service": "web_scraper",
+                    "instance_types": instance_types,
+                    "force_refresh": force_refresh
+                },
+                original_error=e
+            )
         
         except DataFilterServiceError as e:
             logger.error(f"Data filtering failure during analysis: {e}")
-            raise ServiceFailureError(f"Data filtering service failed: {e}")
+            raise ServiceFailureError(
+                message=f"Data filtering service failed: {e}",
+                details={
+                    "service": "data_filter",
+                    "max_interruption_rate": max_interruption_rate
+                },
+                original_error=e
+            )
         
-        except InsufficientRegionsError:
-            # Re-raise insufficient regions error as-is
+        except InsufficientDataError:
+            # Re-raise insufficient data error as-is
             raise
         
         except ServiceFailureError:
@@ -168,7 +198,16 @@ class SpotPriceAnalyzer:
         
         except Exception as e:
             logger.error(f"Unexpected error during analysis: {e}")
-            raise SpotPriceAnalyzerError(f"Analysis failed: {e}")
+            raise SpotPriceAnalyzerError(
+                message=f"Analysis failed: {e}",
+                details={
+                    "instance_types": instance_types,
+                    "max_interruption_rate": max_interruption_rate,
+                    "top_count": top_count,
+                    "force_refresh": force_refresh
+                },
+                original_error=e
+            )
 
     def get_analysis_status(self) -> Dict[str, Any]:
         """
@@ -219,27 +258,48 @@ class SpotPriceAnalyzer:
         try:
             if instance_types is not None:
                 if not isinstance(instance_types, list) or not instance_types:
-                    raise ValueError("Instance types must be a non-empty list")
+                    raise ConfigurationError(
+                        message="Instance types must be a non-empty list",
+                        config_key="instance_types",
+                        config_value=instance_types,
+                        expected_type="list[str]"
+                    )
                 
                 # Validate instance types are supported
                 supported_types = self.web_scraper.get_supported_instance_types()
                 invalid_types = [t for t in instance_types if t not in supported_types]
                 if invalid_types:
-                    raise ValueError(f"Unsupported instance types: {invalid_types}")
+                    raise ConfigurationError(
+                        message=f"Unsupported instance types: {invalid_types}",
+                        config_key="instance_types",
+                        config_value=invalid_types,
+                        expected_type="supported instance types"
+                    )
                 
                 self.instance_types = instance_types.copy()
                 logger.info(f"Updated instance types: {self.instance_types}")
             
             if max_interruption_rate is not None:
                 if not isinstance(max_interruption_rate, (int, float)) or not (0 <= max_interruption_rate <= 1):
-                    raise ValueError("Max interruption rate must be between 0.0 and 1.0")
+                    raise ConfigurationError(
+                        message="Max interruption rate must be between 0.0 and 1.0",
+                        config_key="max_interruption_rate",
+                        config_value=max_interruption_rate,
+                        expected_type="float (0.0-1.0)"
+                    )
                 
                 self.max_interruption_rate = max_interruption_rate
                 self.data_filter.set_max_interruption_rate(max_interruption_rate)
                 logger.info(f"Updated max interruption rate: {max_interruption_rate * 100:.1f}%")
             
-        except ValueError as e:
-            raise SpotPriceAnalyzerError(f"Invalid configuration: {e}")
+        except ConfigurationError:
+            # Re-raise configuration errors as-is
+            raise
+        except Exception as e:
+            raise ConfigurationError(
+                message=f"Configuration update failed: {e}",
+                original_error=e
+            )
 
     def clear_cache(self) -> None:
         """Clear all cached data."""
@@ -270,14 +330,28 @@ class SpotPriceAnalyzer:
             )
             
             if not raw_data:
-                raise ServiceFailureError("No spot data retrieved from web scraping")
+                raise ServiceFailureError(
+                    message="No spot data retrieved from web scraping",
+                    details={
+                        "instance_types": instance_types,
+                        "force_refresh": force_refresh
+                    }
+                )
             
             logger.info(f"Successfully scraped {len(raw_data)} spot price records")
             return raw_data
             
         except WebScraperServiceError as e:
             logger.error(f"Web scraping failed: {e}")
-            raise ServiceFailureError(f"Failed to scrape spot data: {e}")
+            raise ServiceFailureError(
+                message=f"Failed to scrape spot data: {e}",
+                details={
+                    "service": "web_scraper",
+                    "instance_types": instance_types,
+                    "force_refresh": force_refresh
+                },
+                original_error=e
+            )
 
     def _filter_data(self, raw_data: List[RawSpotData], max_interruption_rate: float) -> List[RawSpotData]:
         """
@@ -307,7 +381,15 @@ class SpotPriceAnalyzer:
             
         except DataFilterServiceError as e:
             logger.error(f"Data filtering failed: {e}")
-            raise ServiceFailureError(f"Failed to filter data: {e}")
+            raise ServiceFailureError(
+                message=f"Failed to filter data: {e}",
+                details={
+                    "service": "data_filter",
+                    "input_count": len(raw_data),
+                    "max_interruption_rate": max_interruption_rate
+                },
+                original_error=e
+            )
 
     def _validate_sufficient_regions(self, filtered_data: List[RawSpotData], required_count: int) -> None:
         """
@@ -328,7 +410,12 @@ class SpotPriceAnalyzer:
                 f"{self.max_interruption_rate * 100:.1f}%)"
             )
             logger.error(error_msg)
-            raise InsufficientRegionsError(error_msg)
+            raise InsufficientDataError(
+                message=error_msg,
+                required_count=self.MIN_REGIONS_REQUIRED,
+                available_count=available_count,
+                criteria={"max_interruption_rate": self.max_interruption_rate}
+            )
         
         if available_count < required_count:
             warning_msg = (
@@ -482,16 +569,16 @@ class SpotPriceAnalyzer:
             
         except Exception as e:
             logger.error(f"Failed to generate JSON response: {e}")
-            # Return formatted error response
-            return self.result_formatter.format_error_response(
-                error_message=str(e),
-                error_code=type(e).__name__,
+            # Return formatted error response using error formatter
+            error_response = self.error_formatter.format_error_response(
+                error=e,
                 details={
                     "instance_types": instance_types or self.instance_types,
                     "max_interruption_rate": max_interruption_rate or self.max_interruption_rate,
                     "top_count": top_count
                 }
             )
+            return error_response
 
     def analyze_spot_prices_json_string(
         self,
@@ -537,12 +624,15 @@ class SpotPriceAnalyzer:
             
         except Exception as e:
             logger.error(f"Failed to generate JSON string response: {e}")
-            # Return formatted error as JSON string
-            error_response = self.result_formatter.format_error_response(
-                error_message=f"Failed to generate JSON response: {e}",
-                error_code="JSON_FORMATTING_ERROR"
+            # Return formatted error as JSON string using error formatter
+            error_response = self.error_formatter.format_error_response(
+                error=FormattingError(
+                    message=f"Failed to generate JSON response: {e}",
+                    format_type="JSON",
+                    original_error=e
+                )
             )
-            return self.result_formatter.to_json_string(error_response, indent=indent)
+            return self.error_formatter.to_json_string(error_response, indent=indent)
 
     def format_results_only(self, results: List[SpotPriceResult]) -> Dict[str, Any]:
         """
@@ -559,7 +649,12 @@ class SpotPriceAnalyzer:
             return {"results": formatted_results}
         except Exception as e:
             logger.error(f"Failed to format results: {e}")
-            return self.result_formatter.format_error_response(
-                error_message=f"Failed to format results: {e}",
-                error_code="RESULT_FORMATTING_ERROR"
+            error_response = self.error_formatter.format_error_response(
+                error=FormattingError(
+                    message=f"Failed to format results: {e}",
+                    format_type="spot_price_results",
+                    data_type="SpotPriceResult",
+                    original_error=e
+                )
             )
+            return error_response

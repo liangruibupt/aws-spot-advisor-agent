@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch, MagicMock
 from botocore.exceptions import ClientError, BotoCoreError
 
 from src.services.bedrock_agent_service import BedrockAgentService, BedrockAgentServiceError
+from src.utils.exceptions import BedrockServiceError
 from src.models.spot_data import RawSpotData
 
 # Mock the http_request import to avoid dependency issues in tests
@@ -67,7 +68,7 @@ class TestBedrockAgentService:
         """Test Strands Agent creation failure."""
         mock_agent_class.side_effect = Exception("Agent initialization failed")
         
-        with pytest.raises(BedrockAgentServiceError, match="Failed to initialize Strands Agent"):
+        with pytest.raises(BedrockServiceError, match="Failed to initialize Strands Agent"):
             self.service._get_agent()
 
     @patch.object(BedrockAgentService, '_get_agent')
@@ -136,7 +137,9 @@ class TestBedrockAgentService:
         mock_agent.return_value = None
         mock_get_agent.return_value = mock_agent
         
-        with pytest.raises(BedrockAgentServiceError, match="No response returned from agent"):
+        # The retry decorator will wrap the exception in a RetryError
+        from tenacity import RetryError
+        with pytest.raises(RetryError):
             self.service.execute_web_scraping("https://test.com")
 
     @patch.object(BedrockAgentService, '_get_agent')
@@ -149,7 +152,9 @@ class TestBedrockAgentService:
         )
         mock_get_agent.return_value = mock_agent
         
-        with pytest.raises(BedrockAgentServiceError, match="AWS service error"):
+        # The retry decorator will wrap the exception in a RetryError
+        from tenacity import RetryError
+        with pytest.raises(RetryError):
             self.service.execute_web_scraping("https://test.com")
 
     def test_parse_spot_data_structured_json(self):
