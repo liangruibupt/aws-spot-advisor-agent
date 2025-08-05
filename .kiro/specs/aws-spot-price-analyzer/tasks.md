@@ -63,7 +63,7 @@
   - Write unit tests for error handling paths using pytest
   - _Requirements: 2.4, 3.2_
 
-- [ ] 10. Create integration tests
+- [x] 10. Create integration tests
   - Write integration tests for AWS Bedrock AgentCore connectivity
   - Test end-to-end workflow with mock web page responses
   - Validate complete data flow from scraping to final results
