@@ -84,12 +84,6 @@ This demo shows:
 
 **Python Script**
 ```python
-import sys
-import os
-
-# Add project root to path (if running as script)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from src.services.spot_price_analyzer import SpotPriceAnalyzer
 
 # Initialize analyzer
