@@ -53,14 +53,43 @@ aws configure
 
 ### 3. Basic Usage
 
-**Command Line (Simplest)**
+**Command Line (Recommended)**
+
 ```bash
-# Run with default settings (analyzes both p5en.48xlarge and p5.48xlarge)
-python src/main.py
+# Run as a module from project root (recommended approach)
+python -m src.main
+
+# Alternative: Using the launcher script
+python run_analyzer.py
+
+# Install as package and use console script
+pip install -e .
+aws-spot-analyzer
 ```
+
+**Try the Demo First**
+
+Before setting up AWS credentials, you can run the demo to see how the system works:
+
+```bash
+# Run the interactive demo (works without AWS credentials)
+python demo_usage.py
+```
+
+This demo shows:
+- How to initialize the analyzer
+- Mock data processing workflow
+- JSON output format
+- Configuration options
 
 **Python Script**
 ```python
+import sys
+import os
+
+# Add project root to path (if running as script)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from src.services.spot_price_analyzer import SpotPriceAnalyzer
 
 # Initialize analyzer
@@ -251,23 +280,29 @@ print(json.dumps(status, indent=2))
 
 ### Basic Command
 ```bash
-# Run with defaults
-python src/main.py
+# Run with defaults (recommended)
+python -m src.main
+
+# Alternative: Using launcher script
+python run_analyzer.py
 
 # With custom log level
-LOG_LEVEL=DEBUG python src/main.py
+LOG_LEVEL=DEBUG python -m src.main
 
 # Force refresh data
-FORCE_REFRESH=true python src/main.py
+FORCE_REFRESH=true python -m src.main
 ```
 
 ### Using as a Module
 ```bash
-# Run as Python module
+# Run as Python module from project root (standard approach)
 python -m src.main
 
 # With environment variables
 MAX_INTERRUPTION_RATE=3.0 TOP_REGIONS_COUNT=5 python -m src.main
+
+# Alternative using launcher script
+MAX_INTERRUPTION_RATE=3.0 TOP_REGIONS_COUNT=5 python run_analyzer.py
 ```
 
 ## Integration Examples
