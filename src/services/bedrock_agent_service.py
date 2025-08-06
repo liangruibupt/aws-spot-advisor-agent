@@ -27,6 +27,7 @@ from src.utils.exceptions import (
     DataValidationError
 )
 from src.utils.retry_utils import aws_service_retry, web_scraping_retry
+from src.utils.config import load_config
 
 
 logger = logging.getLogger(__name__)
@@ -48,18 +49,30 @@ class BedrockAgentService:
 
     def __init__(
         self,
-        region_name: str = "us-east-1",
-        model_name: str = "anthropic.claude-3-sonnet-20240229-v1:0"
+        region_name: Optional[str] = None,
+        model_name: Optional[str] = None
     ):
         """
         Initialize the Bedrock Agent Service.
         
         Args:
-            region_name: AWS region for Bedrock service
-            model_name: Bedrock model to use for content analysis
+            region_name: AWS region for Bedrock service (uses config default if None)
+            model_name: Bedrock model to use for content analysis (uses config default if None)
         """
-        self.region_name = region_name
-        self.model_name = model_name
+        # Load configuration
+        config = load_config()
+        
+        self.region_name = region_name or config.get('bedrock_region', 'us-east-1')
+        self.model_name = model_name or config.get('bedrock_model_id', 'anthropic.claude-4-sonnet-20241022-v1:0')
+        
+        # Fallback models to try if the primary model fails
+        self.fallback_models = [
+            'anthropic.claude-4-sonnet-20241022-v1:0',
+            'anthropic.claude-3-7-sonnet-20241022-v1:0', 
+            'anthropic.claude-3-5-sonnet-20241022-v2:0',
+            'anthropic.claude-3-5-sonnet-20240620-v1:0',
+            'anthropic.claude-3-sonnet-20240229-v1:0'
+        ]
         
         # Initialize Strands agent
         self._agent: Optional[Agent] = None
@@ -92,32 +105,63 @@ class BedrockAgentService:
         """
 
     def _get_agent(self) -> Agent:
-        """Get or create Strands Agent instance."""
+        """Get or create Strands Agent instance with fallback models."""
         if self._agent is None:
-            try:
-                # Create agent with Bedrock model
-                self._agent = Agent(
-                    model=f"bedrock:{self.model_name}",
-                    tools=[http_request]
-                )
-            except ClientError as e:
-                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
-                logger.error(f"AWS client error creating Strands Agent: {e}")
-                raise BedrockServiceError(
-                    message=f"Failed to initialize Strands Agent: {e}",
-                    service_error_code=error_code,
-                    region=self.region_name,
-                    model_name=self.model_name,
-                    original_error=e
-                )
-            except Exception as e:
-                logger.error(f"Failed to create Strands Agent: {e}")
-                raise BedrockServiceError(
-                    message=f"Failed to initialize Strands Agent: {e}",
-                    region=self.region_name,
-                    model_name=self.model_name,
-                    original_error=e
-                )
+            # Try primary model first
+            models_to_try = [self.model_name] + [m for m in self.fallback_models if m != self.model_name]
+            
+            last_error = None
+            for model_id in models_to_try:
+                try:
+                    logger.info(f"Attempting to create Strands Agent with model: {model_id}")
+                    # Create agent with Bedrock model
+                    self._agent = Agent(
+                        model=f"bedrock:{model_id}",
+                        tools=[http_request]
+                    )
+                    # If successful, update the model name
+                    if model_id != self.model_name:
+                        logger.info(f"Successfully initialized with fallback model: {model_id}")
+                        self.model_name = model_id
+                    else:
+                        logger.info(f"Successfully initialized with primary model: {model_id}")
+                    break
+                    
+                except ClientError as e:
+                    error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+                    logger.warning(f"Failed to initialize with model {model_id}: {e}")
+                    last_error = e
+                    
+                    # If it's a validation error (invalid model), try next model
+                    if error_code in ['ValidationException', 'ResourceNotFoundException']:
+                        continue
+                    else:
+                        # For other errors, don't try fallbacks
+                        break
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to create Strands Agent with model {model_id}: {e}")
+                    last_error = e
+                    continue
+            
+            # If no model worked, raise the last error
+            if self._agent is None:
+                if isinstance(last_error, ClientError):
+                    error_code = last_error.response.get('Error', {}).get('Code', 'Unknown')
+                    raise BedrockServiceError(
+                        message=f"Failed to initialize Strands Agent with any available model. Last error: {last_error}",
+                        service_error_code=error_code,
+                        region=self.region_name,
+                        model_name=self.model_name,
+                        original_error=last_error
+                    )
+                else:
+                    raise BedrockServiceError(
+                        message=f"Failed to initialize Strands Agent with any available model. Last error: {last_error}",
+                        region=self.region_name,
+                        model_name=self.model_name,
+                        original_error=last_error
+                    )
         
         # At this point, self._agent is guaranteed to not be None
         assert self._agent is not None

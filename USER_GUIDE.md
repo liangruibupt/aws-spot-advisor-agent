@@ -229,7 +229,20 @@ export LOG_LEVEL=DEBUG                # DEBUG, INFO, WARNING, ERROR (default: IN
 
 # AWS settings
 export AWS_DEFAULT_REGION=eu-west-1   # Default AWS region (default: us-east-1)
+
+# Bedrock model settings
+export BEDROCK_MODEL_ID=us.anthropic.claude-3-7-sonnet-20250219-v1:0  # Claude model to use
+export BEDROCK_REGION=us-east-1       # Bedrock region (default: us-east-1)
 ```
+
+### Available Claude Models
+
+The system supports the latest Claude models:
+
+- **Claude 4 Sonnet** (recommended): `us.anthropic.claude-sonnet-4-20250514-v1:0`
+- **Claude 3.7 Sonnet**: `us.anthropic.claude-3-7-sonnet-20250219-v1:0`
+
+**Note**: The `us.` prefix is required for cross-region inference. Make sure you have access to these models in your AWS Bedrock account.
 
 ## Advanced Usage
 
