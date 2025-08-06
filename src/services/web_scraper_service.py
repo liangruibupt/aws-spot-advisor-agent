@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any
 from urllib.parse import urlparse
+from concurrent.futures import Future
 
 from src.services.bedrock_agent_service import BedrockAgentService, BedrockAgentServiceError
 from src.models.spot_data import RawSpotData
@@ -21,6 +22,7 @@ from src.utils.exceptions import (
     ServiceUnavailableError
 )
 from src.utils.retry_utils import web_scraping_retry
+from src.utils.cache import TTLCache, CacheWarmer, ttl_cache, spot_data_cache
 
 
 logger = logging.getLogger(__name__)
@@ -49,7 +51,8 @@ class WebScraperService:
     def __init__(
         self,
         bedrock_service: Optional[BedrockAgentService] = None,
-        cache_ttl_seconds: int = CACHE_TTL_SECONDS
+        cache_ttl_seconds: int = CACHE_TTL_SECONDS,
+        use_global_cache: bool = True
     ):
         """
         Initialize the Web Scraper Service.
@@ -57,12 +60,25 @@ class WebScraperService:
         Args:
             bedrock_service: BedrockAgentService instance (optional, will create if None)
             cache_ttl_seconds: Cache time-to-live in seconds (default: 1 hour)
+            use_global_cache: Whether to use global cache instance (default: True)
         """
         self.bedrock_service = bedrock_service or BedrockAgentService()
         self.cache_ttl_seconds = cache_ttl_seconds
         
-        # In-memory cache for scraped data
-        self._cache: Dict[str, Dict[str, Any]] = {}
+        # Use either global cache or create new instance
+        if use_global_cache:
+            self._cache = spot_data_cache
+            # Update TTL if different from global default
+            if cache_ttl_seconds != spot_data_cache.default_ttl_seconds:
+                spot_data_cache.default_ttl_seconds = cache_ttl_seconds
+        else:
+            self._cache = TTLCache(default_ttl_seconds=cache_ttl_seconds, max_size=100)
+        
+        # Cache warmer for preloading data
+        self._cache_warmer = CacheWarmer(max_workers=2)
+        
+        # Legacy cache for backward compatibility
+        self._legacy_cache: Dict[str, Dict[str, Any]] = {}
         
         # Supported instance types
         self.supported_instance_types = ["p5en.48xlarge", "p5.48xlarge"]
@@ -118,26 +134,18 @@ class WebScraperService:
             
             # Check cache first (unless force refresh)
             cache_key = self._get_cache_key(instance_types)
-            if not force_refresh and self._is_cache_valid(cache_key):
-                logger.info("Returning cached spot data")
-                try:
-                    cached_data: List[RawSpotData] = self._cache[cache_key]["data"]
+            if not force_refresh:
+                cached_data = self._cache.get(cache_key)
+                if cached_data is not None:
+                    logger.info("Returning cached spot data")
                     return cached_data
-                except KeyError as e:
-                    logger.warning(f"Cache key error: {e}")
-                    raise CacheError(
-                        message=f"Failed to retrieve cached data: {e}",
-                        cache_key=cache_key,
-                        operation="retrieve",
-                        original_error=e
-                    )
             
             # Scrape fresh data
             raw_content = self._fetch_web_content()
             spot_data = self._parse_spot_data(raw_content, instance_types)
             
             # Update cache
-            self._update_cache(cache_key, spot_data)
+            self._cache.set(cache_key, spot_data, ttl_seconds=self.cache_ttl_seconds)
             
             logger.info(f"Successfully scraped {len(spot_data)} spot price records")
             return spot_data
@@ -194,30 +202,30 @@ class WebScraperService:
         Returns:
             Dictionary containing cache information
         """
-        entries: List[Dict[str, Any]] = []
-        cache_info = {
-            "cache_entries": len(self._cache),
+        # Get stats from TTL cache
+        cache_stats = self._cache.get_stats()
+        entries_info = self._cache.get_entries_info()
+        
+        # Add data count for each entry
+        for entry_info in entries_info:
+            cache_key = entry_info['key']
+            cached_data = self._cache.get(cache_key)
+            if cached_data and isinstance(cached_data, list):
+                entry_info['data_count'] = len(cached_data)
+            else:
+                entry_info['data_count'] = 0
+        
+        return {
+            "cache_type": "TTLCache",
             "cache_ttl_seconds": self.cache_ttl_seconds,
-            "entries": entries
+            "entries": entries_info,
+            **cache_stats
         }
-        
-        current_time = datetime.now(timezone.utc)
-        
-        for cache_key, cache_entry in self._cache.items():
-            entry_info = {
-                "key": cache_key,
-                "timestamp": cache_entry["timestamp"].isoformat(),
-                "data_count": len(cache_entry["data"]),
-                "age_seconds": (current_time - cache_entry["timestamp"]).total_seconds(),
-                "is_valid": self._is_cache_valid(cache_key)
-            }
-            entries.append(entry_info)
-        
-        return cache_info
 
     def clear_cache(self) -> None:
         """Clear all cached data."""
         self._cache.clear()
+        self._legacy_cache.clear()
         logger.info("Cache cleared")
 
     def _fetch_web_content(self) -> str:
@@ -353,6 +361,85 @@ class WebScraperService:
             logger.warning(f"Error validating spot data: {e}")
             return False
 
+    def warm_cache(
+        self,
+        instance_types: Optional[List[str]] = None,
+        force: bool = False
+    ) -> Future[bool]:
+        """
+        Warm cache with spot data for given instance types.
+        
+        Args:
+            instance_types: List of instance types to warm (defaults to supported types)
+            force: Force warming even if data exists
+            
+        Returns:
+            Future that resolves to True if warming succeeded
+        """
+        if instance_types is None:
+            instance_types = self.supported_instance_types.copy()
+        
+        cache_key = self._get_cache_key(instance_types)
+        
+        def value_factory():
+            return self._fetch_and_parse_data(instance_types)
+        
+        logger.info(f"Warming cache for instance types: {instance_types}")
+        return self._cache_warmer.warm_cache(
+            self._cache, cache_key, value_factory, 
+            ttl_seconds=self.cache_ttl_seconds, force=force
+        )
+    
+    def warm_all_supported_types(self, force: bool = False) -> List[Future[bool]]:
+        """
+        Warm cache for all supported instance types.
+        
+        Args:
+            force: Force warming even if data exists
+            
+        Returns:
+            List of futures for warming tasks
+        """
+        logger.info("Warming cache for all supported instance types")
+        
+        # Create warming entries for individual types and combinations
+        warming_entries = []
+        
+        # Individual types
+        for instance_type in self.supported_instance_types:
+            cache_key = self._get_cache_key([instance_type])
+            value_factory = lambda it=instance_type: self._fetch_and_parse_data([it])
+            warming_entries.append((cache_key, value_factory, self.cache_ttl_seconds))
+        
+        # All types combined
+        cache_key = self._get_cache_key(self.supported_instance_types)
+        value_factory = lambda: self._fetch_and_parse_data(self.supported_instance_types)
+        warming_entries.append((cache_key, value_factory, self.cache_ttl_seconds))
+        
+        return self._cache_warmer.warm_multiple(self._cache, warming_entries, force=force)
+    
+    def wait_for_cache_warming(self, timeout: Optional[float] = None) -> None:
+        """
+        Wait for all cache warming tasks to complete.
+        
+        Args:
+            timeout: Maximum time to wait in seconds
+        """
+        self._cache_warmer.wait_for_warming(timeout=timeout)
+    
+    def _fetch_and_parse_data(self, instance_types: List[str]) -> List[RawSpotData]:
+        """
+        Fetch and parse spot data without caching.
+        
+        Args:
+            instance_types: List of instance types
+            
+        Returns:
+            List of RawSpotData objects
+        """
+        raw_content = self._fetch_web_content()
+        return self._parse_spot_data(raw_content, instance_types)
+    
     def _get_cache_key(self, instance_types: List[str]) -> str:
         """
         Generate cache key for instance types.
@@ -365,54 +452,7 @@ class WebScraperService:
         """
         # Sort instance types for consistent cache keys
         sorted_types = sorted(instance_types)
-        return "|".join(sorted_types)
-
-    def _is_cache_valid(self, cache_key: str) -> bool:
-        """
-        Check if cached data is still valid.
-        
-        Args:
-            cache_key: Cache key to check
-            
-        Returns:
-            True if cache is valid, False otherwise
-        """
-        if cache_key not in self._cache:
-            return False
-        
-        cache_entry = self._cache[cache_key]
-        cache_timestamp: datetime = cache_entry["timestamp"]
-        cache_age = datetime.now(timezone.utc) - cache_timestamp
-        
-        return cache_age.total_seconds() < self.cache_ttl_seconds
-
-    def _update_cache(self, cache_key: str, data: List[RawSpotData]) -> None:
-        """
-        Update cache with new data.
-        
-        Args:
-            cache_key: Cache key
-            data: Spot data to cache
-            
-        Raises:
-            CacheError: If cache update fails
-        """
-        try:
-            self._cache[cache_key] = {
-                "timestamp": datetime.now(timezone.utc),
-                "data": data
-            }
-            
-            logger.debug(f"Updated cache for key: {cache_key}")
-            
-        except Exception as e:
-            logger.error(f"Failed to update cache for key {cache_key}: {e}")
-            raise CacheError(
-                message=f"Failed to update cache: {e}",
-                cache_key=cache_key,
-                operation="update",
-                original_error=e
-            )
+        return f"spot_data:{':'.join(sorted_types)}"
 
     def get_supported_instance_types(self) -> List[str]:
         """
@@ -466,8 +506,16 @@ class WebScraperService:
         
         cache_key = self._get_cache_key(instance_types)
         
-        if cache_key in self._cache:
-            timestamp: datetime = self._cache[cache_key]["timestamp"]
-            return timestamp
+        # Check TTL cache entries info
+        entries_info = self._cache.get_entries_info()
+        for entry_info in entries_info:
+            if entry_info['key'] == cache_key:
+                return datetime.fromisoformat(entry_info['created'])
         
         return None
+    
+    def shutdown(self) -> None:
+        """Shutdown the web scraper service and clean up resources."""
+        logger.info("Shutting down WebScraperService")
+        self._cache_warmer.shutdown(wait=True)
+        logger.info("WebScraperService shutdown complete")

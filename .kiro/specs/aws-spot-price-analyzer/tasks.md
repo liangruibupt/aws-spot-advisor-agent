@@ -70,14 +70,14 @@
   - Test error scenarios and recovery mechanisms using pytest
   - _Requirements: 1.1, 2.1, 2.2_
 
-- [ ] 11. Add configuration and environment setup
+- [x] 11. Add configuration and environment setup
   - Create configuration management using python-dotenv for environment variables
   - Add AWS credentials and settings handling via boto3 configuration
   - Implement logging configuration using Python's logging module
   - Write tests for configuration validation
   - _Requirements: 2.2, 2.4_
 
-- [ ] 12. Implement caching mechanism
+- [x] 12. Implement caching mechanism
   - Add in-memory caching using Python's functools.lru_cache or custom cache
   - Create cache invalidation logic for forced refreshes with TTL
   - Implement cache warming strategies for better performance

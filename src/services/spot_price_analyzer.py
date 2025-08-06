@@ -25,6 +25,7 @@ from src.utils.exceptions import (
 )
 from src.utils.error_response import ErrorResponseFormatter
 from src.utils.retry_utils import data_processing_retry
+from src.utils.cache import ttl_cache, analysis_cache, cache_warmer
 
 
 logger = logging.getLogger(__name__)
@@ -520,6 +521,168 @@ class SpotPriceAnalyzer:
             "valid": valid_types,
             "invalid": invalid_types
         }
+
+    def analyze_spot_prices_cached(
+        self,
+        instance_types: Optional[List[str]] = None,
+        max_interruption_rate: Optional[float] = None,
+        top_count: int = 3,
+        force_refresh: bool = False,
+        cache_ttl_seconds: Optional[float] = None
+    ) -> AnalysisResponse:
+        """
+        Perform cached spot price analysis workflow.
+        
+        This method provides caching for analysis results to improve performance
+        for repeated requests with the same parameters.
+        
+        Args:
+            instance_types: List of instance types to analyze (optional)
+            max_interruption_rate: Maximum acceptable interruption rate (optional)
+            top_count: Number of top regions to return (default: 3)
+            force_refresh: Force refresh of cached data (default: False)
+            cache_ttl_seconds: Cache TTL override (uses default if None)
+            
+        Returns:
+            AnalysisResponse containing top regions and analysis metadata
+            
+        Raises:
+            SpotPriceAnalyzerError: If analysis fails
+            InsufficientRegionsError: If insufficient regions meet criteria
+            ServiceFailureError: If a dependent service fails
+        """
+        # Use defaults if not provided
+        if instance_types is None:
+            instance_types = self.instance_types.copy()
+        if max_interruption_rate is None:
+            max_interruption_rate = self.max_interruption_rate
+        
+        # Create cache key
+        cache_key = self._create_analysis_cache_key(
+            instance_types, max_interruption_rate, top_count
+        )
+        
+        # Check cache first (unless force refresh)
+        if not force_refresh:
+            cached_result = analysis_cache.get(cache_key)
+            if cached_result is not None:
+                logger.info("Returning cached analysis result")
+                return cached_result
+        
+        # Perform analysis
+        result = self.analyze_spot_prices(
+            instance_types=instance_types,
+            max_interruption_rate=max_interruption_rate,
+            top_count=top_count,
+            force_refresh=force_refresh
+        )
+        
+        # Cache the result
+        ttl = cache_ttl_seconds or analysis_cache.default_ttl_seconds
+        analysis_cache.set(cache_key, result, ttl_seconds=ttl)
+        
+        logger.debug(f"Cached analysis result with key: {cache_key}")
+        return result
+    
+    def warm_analysis_cache(
+        self,
+        instance_type_combinations: Optional[List[List[str]]] = None,
+        max_interruption_rates: Optional[List[float]] = None,
+        top_counts: Optional[List[int]] = None,
+        force: bool = False
+    ) -> List[Any]:
+        """
+        Warm the analysis cache with common parameter combinations.
+        
+        Args:
+            instance_type_combinations: List of instance type combinations to warm
+            max_interruption_rates: List of interruption rates to warm
+            top_counts: List of top counts to warm
+            force: Force warming even if entries exist
+            
+        Returns:
+            List of futures for warming tasks
+        """
+        # Use defaults if not provided
+        if instance_type_combinations is None:
+            instance_type_combinations = [
+                self.instance_types.copy(),  # All types
+                [self.instance_types[0]],    # First type only
+                [self.instance_types[1]] if len(self.instance_types) > 1 else []  # Second type only
+            ]
+        
+        if max_interruption_rates is None:
+            max_interruption_rates = [self.max_interruption_rate, 0.03, 0.10]  # 5%, 3%, 10%
+        
+        if top_counts is None:
+            top_counts = [3, 5, 10]
+        
+        warming_entries = []
+        
+        for instance_types in instance_type_combinations:
+            if not instance_types:  # Skip empty combinations
+                continue
+                
+            for max_rate in max_interruption_rates:
+                for top_count in top_counts:
+                    cache_key = self._create_analysis_cache_key(
+                        instance_types, max_rate, top_count
+                    )
+                    
+                    def value_factory(it=instance_types, mr=max_rate, tc=top_count):
+                        return self.analyze_spot_prices(
+                            instance_types=it,
+                            max_interruption_rate=mr,
+                            top_count=tc,
+                            force_refresh=False
+                        )
+                    
+                    warming_entries.append((cache_key, value_factory, None))
+        
+        logger.info(f"Warming analysis cache with {len(warming_entries)} combinations")
+        return cache_warmer.warm_multiple(analysis_cache, warming_entries, force=force)
+    
+    def get_analysis_cache_info(self) -> Dict[str, Any]:
+        """
+        Get information about the analysis cache state.
+        
+        Returns:
+            Dictionary containing cache information
+        """
+        cache_stats = analysis_cache.get_stats()
+        entries_info = analysis_cache.get_entries_info()
+        
+        return {
+            "cache_type": "TTLCache",
+            "cache_purpose": "analysis_results",
+            "entries": entries_info,
+            **cache_stats
+        }
+    
+    def clear_analysis_cache(self) -> None:
+        """Clear the analysis cache."""
+        analysis_cache.clear()
+        logger.info("Analysis cache cleared")
+    
+    def _create_analysis_cache_key(
+        self,
+        instance_types: List[str],
+        max_interruption_rate: float,
+        top_count: int
+    ) -> str:
+        """
+        Create cache key for analysis parameters.
+        
+        Args:
+            instance_types: List of instance types
+            max_interruption_rate: Maximum interruption rate
+            top_count: Number of top results
+            
+        Returns:
+            Cache key string
+        """
+        sorted_types = sorted(instance_types)
+        return f"analysis:{':'.join(sorted_types)}:{max_interruption_rate}:{top_count}"
 
     def analyze_spot_prices_json(
         self,
