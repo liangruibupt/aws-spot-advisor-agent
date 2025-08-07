@@ -7,6 +7,8 @@ import boto3
 import json
 from botocore.exceptions import ClientError
 
+inference_profiles = []
+
 def list_available_models():
     """List all available models in AWS Bedrock."""
     try:
@@ -17,12 +19,15 @@ def list_available_models():
         print("=" * 60)
         
         # List foundation models
-        response = bedrock.list_foundation_models()
+        response = bedrock.list_foundation_models(byProvider='Anthropic')
         
         # Filter for Anthropic Claude models
         claude_models = []
         for model in response.get('modelSummaries', []):
-            if 'anthropic' in model.get('modelId', '').lower() and 'claude' in model.get('modelId', '').lower():
+            if 'active' in model.get('modelLifecycle', '').get('status', '').lower():
+                test_result = test_model_access(model.get('modelId'))
+                if not test_result:
+                    continue
                 claude_models.append({
                     'modelId': model.get('modelId'),
                     'modelName': model.get('modelName'),
@@ -73,51 +78,142 @@ def list_available_models():
         print(f"❌ Unexpected error: {e}")
         return []
 
-def test_model_access():
+def test_model_access(model_id: str):
     """Test if we can access Bedrock runtime."""
     try:
         bedrock_runtime = boto3.client('bedrock-runtime', region_name='us-east-1')
-        print("\n🔧 Testing Bedrock Runtime access...")
+        print(f"\n🔧 Testing Bedrock Runtime access {model_id}...")
         
-        # This will fail but tells us if we have runtime access
+        user_message = "Explain the concept of quantum entanglement in simple terms."
+        conversation = [{
+            "role": "user",
+            "content": [{"text": user_message}],
+            }
+        ]
+        # Tells us if we have runtime access
         try:
-            bedrock_runtime.invoke_model(
-                modelId='test-model',
-                body=json.dumps({'test': 'test'})
+            response = bedrock_runtime.converse(
+                modelId=model_id,
+                messages=conversation,
+                inferenceConfig={"maxTokens": 512, "temperature": 0.5, "topP": 0.9},
             )
+            # Extract and print the response text.
+            response_text = response["output"]["message"]["content"][0]["text"]
+            print(f"Invoke response {response_text}")
+            print(f"✅ Invoke {model_id} OK")
+            return True
+
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            # print (f"❌ Bedrock Runtime access: {e.response}")
             if error_code == 'ValidationException':
-                print("✅ Bedrock Runtime access: OK (invalid model test)")
+                # Test with inference profile (if available)
+                result = test_model_access_inference_profile(model_id)
+                if not result:
+                    return False
+                print("✅ Bedrock Runtime access: OK")
                 return True
+            elif error_code == 'ResourceNotFoundException':
+                print("❌ Bedrock Runtime access: ResourceNotFoundException")
+                return False
             elif error_code == 'AccessDeniedException':
                 print("❌ Bedrock Runtime access: DENIED")
                 return False
             else:
                 print(f"⚠️  Bedrock Runtime access: Unknown ({error_code})")
-                return True
+                return False
                 
     except Exception as e:
         print(f"❌ Bedrock Runtime test failed: {e}")
         return False
+
+def test_model_access_inference_profile(model_id: str):
+    """Test if we can access Bedrock runtime."""
+    try:
+        bedrock_runtime = boto3.client('bedrock-runtime', region_name='us-east-1')
+        print("\n🔧 Testing Bedrock Runtime access with inference profile...")
+        
+        user_message = "Explain the concept of quantum entanglement in simple terms."
+        conversation = [{
+            "role": "user",
+            "content": [{"text": user_message}],
+            }
+        ]
+        
+        for profile in inference_profiles:
+            if model_id in profile.get('inferenceProfileId'):
+                inference_profile_id = profile.get('inferenceProfileId')
+                print(f"   Using inference profile: {inference_profile_id} for {model_id}")
+        
+                try:
+                    response = bedrock_runtime.converse(
+                        modelId=inference_profile_id,
+                        messages=conversation,
+                        inferenceConfig={"maxTokens": 512, "temperature": 0.5, "topP": 0.9},
+                    )
+                    # Extract and print the response text.
+                    response_text = response["output"]["message"]["content"][0]["text"]
+                    print(f"Invoke response {response_text}")
+                    print(f"✅ Invoke {model_id} OK")
+                    return True
+
+                except ClientError as e:
+                    error_msg = e.response.get('Error', {})
+                    print (f"❌ Bedrock Runtime access with inference profile: {error_msg}")
+                    return False
+                
+    except Exception as e:
+        print(f"❌ Bedrock Runtime test failed: {e}")
+        return False
+    
+def get_inference_profiles():
+    """Get available Bedrock inference profiles."""
+    try:
+        bedrock = boto3.client('bedrock', region_name='us-east-1')
+        
+        print("\n🔍 Checking available inference profiles...")
+        print("=" * 60)
+        
+        response = bedrock.list_inference_profiles(typeEquals='SYSTEM_DEFINED')
+        profiles = response.get('inferenceProfileSummaries', [])
+        
+        if profiles:
+            print(f"✅ Found {len(profiles)} inference profile(s):")
+            print()
+            
+            for i, profile in enumerate(profiles, 1):
+                print(f"{i}. Profile Name: {profile.get('inferenceProfileName')}")
+                print(f"   Profile ID: {profile.get('inferenceProfileId')}")
+                if 'models' in profile:
+                    print(f"   Models: {', '.join([m.get('modelId', 'Unknown') for m in profile.get('models', [])])}")
+                print("-" * 40)
+                
+        else:
+            print("❌ No inference profiles found!")
+            
+        return profiles
+        
+    except ClientError as e:
+        error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+        print(f"❌ AWS Error getting inference profiles ({error_code}): {e}")
+        return []
+    except Exception as e:
+        print(f"❌ Unexpected error getting inference profiles: {e}")
+        return []
 
 def main():
     """Main function."""
     print("AWS Bedrock Model Checker")
     print("=" * 60)
     
-    # Test runtime access
-    runtime_ok = test_model_access()
-    
     # List available models
     models = list_available_models()
     
     print("\n📋 SUMMARY:")
     print("=" * 60)
-    print(f"Bedrock Runtime Access: {'✅ OK' if runtime_ok else '❌ DENIED'}")
     print(f"Available Claude Models: {len(models)}")
     
-    if not models and runtime_ok:
+    if not models:
         print("\n💡 NEXT STEPS:")
         print("1. Enable Claude models in AWS Bedrock console")
         print("2. Go to: https://console.aws.amazon.com/bedrock/")
@@ -125,4 +221,5 @@ def main():
         print("4. Wait for approval (usually instant for Claude)")
 
 if __name__ == "__main__":
+    inference_profiles = get_inference_profiles()
     main()
