@@ -15,6 +15,7 @@ from dataclasses import asdict
 import boto3
 from botocore.exceptions import ClientError, BotoCoreError
 from strands import Agent
+from strands.models.bedrock import BedrockModel
 from strands.agent.agent_result import AgentResult
 from strands_tools.http_request import http_request, extract_content_from_html
 
@@ -66,12 +67,15 @@ class BedrockAgentService:
         self.model_name = model_name or config.get('bedrock_model_id', 'anthropic.claude-sonnet-4-20250514-v1:0')
         
         # Fallback models from configuration and additional backups
-        primary_fallback = config.get('bedrock_fallback_model_id', 'anthropic.claude-3-7-sonnet-20250219-v1:0')
+        primary_fallback = config.get('bedrock_fallback_model_id', 'anthropic.claude-3-sonnet-20240229-v1:0')
         self.fallback_models = [
             primary_fallback,  # Configured fallback model
             'anthropic.claude-3-5-sonnet-20241022-v2:0',  # Claude 3.5 Sonnet v2
             'anthropic.claude-3-5-sonnet-20240620-v1:0',  # Claude 3.5 Sonnet
-            'anthropic.claude-3-sonnet-20240229-v1:0'     # Claude 3 Sonnet (stable fallback)
+            'anthropic.claude-3-sonnet-20240229-v1:0',    # Claude 3 Sonnet (stable fallback)
+            'anthropic.claude-3-haiku-20240307-v1:0',     # Claude 3 Haiku (fast fallback)
+            'anthropic.claude-v2:1',                      # Claude v2.1 (legacy fallback)
+            'anthropic.claude-v2'                         # Claude v2 (legacy fallback)
         ]
         
         # Remove duplicates while preserving order
@@ -109,7 +113,7 @@ class BedrockAgentService:
         """
 
     def _get_agent(self) -> Agent:
-        """Get or create Strands Agent instance with fallback models."""
+        """Get or create Strands Agent instance with fallback models and inference profiles."""
         if self._agent is None:
             # Try primary model first
             models_to_try = [self.model_name] + [m for m in self.fallback_models if m != self.model_name]
@@ -118,11 +122,22 @@ class BedrockAgentService:
             for model_id in models_to_try:
                 try:
                     logger.info(f"Attempting to create Strands Agent with model: {model_id}")
+                    
+                    # Create Bedrock model
+                    session = boto3.Session()
+                    bedrock_model = BedrockModel(
+                        model_id=model_id,
+                        boto_session=session,
+                        temperature=0.3,
+                    )
+                    
                     # Create agent with Bedrock model
                     self._agent = Agent(
-                        model=f"bedrock:{model_id}",
-                        tools=[http_request]
+                        model=bedrock_model,
+                        tools=[http_request],
+                        callback_handler=None  # Disable default callback handler
                     )
+                    
                     # If successful, update the model name
                     if model_id != self.model_name:
                         logger.info(f"Successfully initialized with fallback model: {model_id}")
@@ -135,6 +150,33 @@ class BedrockAgentService:
                     error_code = e.response.get('Error', {}).get('Code', 'Unknown')
                     logger.warning(f"Failed to initialize with model {model_id}: {e}")
                     last_error = e
+                    
+                    # If it's a validation error, try with inference profile
+                    if error_code == 'ValidationException':
+                        inference_profile_id = self._try_inference_profile(model_id)
+                        if inference_profile_id:
+                            try:
+                                logger.info(f"Attempting to create Strands Agent with inference profile: {inference_profile_id}")
+                                
+                                # Create Bedrock model with inference profile
+                                session = boto3.Session()
+                                bedrock_model = BedrockModel(
+                                    model_id=inference_profile_id,
+                                    boto_session=session,
+                                    temperature=0.3,
+                                )
+                                
+                                self._agent = Agent(
+                                    model=bedrock_model,
+                                    tools=[http_request],
+                                    callback_handler=None  # Disable default callback handler
+                                )
+                                logger.info(f"Successfully initialized with inference profile: {inference_profile_id}")
+                                self.model_name = inference_profile_id
+                                break
+                            except Exception as profile_error:
+                                logger.warning(f"Failed to initialize with inference profile {inference_profile_id}: {profile_error}")
+                                continue
                     
                     # If it's a validation error (invalid model), try next model
                     if error_code in ['ValidationException', 'ResourceNotFoundException']:
@@ -170,6 +212,80 @@ class BedrockAgentService:
         # At this point, self._agent is guaranteed to not be None
         assert self._agent is not None
         return self._agent
+
+    def _try_inference_profile(self, model_id: str) -> Optional[str]:
+        """
+        Try to find and test an inference profile for the given model ID.
+        
+        Args:
+            model_id: The original model ID that failed
+            
+        Returns:
+            The working inference profile ID, or None if none found
+        """
+        try:
+            bedrock = boto3.client('bedrock', region_name=self.region_name)
+            
+            # Get available inference profiles
+            response = bedrock.list_inference_profiles(typeEquals='SYSTEM_DEFINED')
+            inference_profiles = response.get('inferenceProfileSummaries', [])
+            
+            logger.info(f"Found {len(inference_profiles)} inference profiles to try")
+            
+            # Look for matching inference profile
+            for profile in inference_profiles:
+                profile_id = profile.get('inferenceProfileId', '')
+                
+                # Check if this profile matches our model
+                if model_id in profile_id or any(model_id in str(model.get('modelId', '')) for model in profile.get('models', [])):
+                    logger.info(f"Testing inference profile: {profile_id}")
+                    
+                    # Test the inference profile with a simple call
+                    if self._test_inference_profile(profile_id):
+                        logger.info(f"Inference profile {profile_id} works!")
+                        return profile_id
+                    else:
+                        logger.warning(f"Inference profile {profile_id} failed test")
+            
+            logger.warning(f"No working inference profile found for model {model_id}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error trying inference profiles: {e}")
+            return None
+
+    def _test_inference_profile(self, profile_id: str) -> bool:
+        """
+        Test if an inference profile works by making a simple call.
+        
+        Args:
+            profile_id: The inference profile ID to test
+            
+        Returns:
+            True if the profile works, False otherwise
+        """
+        try:
+            bedrock_runtime = boto3.client('bedrock-runtime', region_name=self.region_name)
+            
+            user_message = "Hello, can you respond with 'Connection successful'?"
+            conversation = [{
+                "role": "user",
+                "content": [{"text": user_message}],
+            }]
+            
+            response = bedrock_runtime.converse(
+                modelId=profile_id,
+                messages=conversation,
+                inferenceConfig={"maxTokens": 50, "temperature": 0.5, "topP": 0.9},
+            )
+            
+            # Extract response text
+            response_text = response["output"]["message"]["content"][0]["text"]
+            return "successful" in response_text.lower()
+            
+        except Exception as e:
+            logger.warning(f"Inference profile test failed for {profile_id}: {e}")
+            return False
 
     @aws_service_retry(max_attempts=3)
     def execute_web_scraping(self, url: str, custom_instructions: Optional[str] = None) -> str:

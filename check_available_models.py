@@ -26,10 +26,10 @@ def list_available_models():
         for model in response.get('modelSummaries', []):
             if 'active' in model.get('modelLifecycle', '').get('status', '').lower():
                 test_result = test_model_access(model.get('modelId'))
-                if not test_result:
+                if test_result == '' or test_result is None:
                     continue
                 claude_models.append({
-                    'modelId': model.get('modelId'),
+                    'modelId': test_result,
                     'modelName': model.get('modelName'),
                     'providerName': model.get('providerName'),
                     'inputModalities': model.get('inputModalities', []),
@@ -101,7 +101,7 @@ def test_model_access(model_id: str):
             response_text = response["output"]["message"]["content"][0]["text"]
             print(f"Invoke response {response_text}")
             print(f"✅ Invoke {model_id} OK")
-            return True
+            return model_id
 
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code', 'Unknown')
@@ -110,22 +110,22 @@ def test_model_access(model_id: str):
                 # Test with inference profile (if available)
                 result = test_model_access_inference_profile(model_id)
                 if not result:
-                    return False
+                    return None
                 print("✅ Bedrock Runtime access: OK")
-                return True
+                return result
             elif error_code == 'ResourceNotFoundException':
                 print("❌ Bedrock Runtime access: ResourceNotFoundException")
-                return False
+                return None
             elif error_code == 'AccessDeniedException':
                 print("❌ Bedrock Runtime access: DENIED")
-                return False
+                return None
             else:
                 print(f"⚠️  Bedrock Runtime access: Unknown ({error_code})")
-                return False
+                return None
                 
     except Exception as e:
         print(f"❌ Bedrock Runtime test failed: {e}")
-        return False
+        return None
 
 def test_model_access_inference_profile(model_id: str):
     """Test if we can access Bedrock runtime."""
@@ -154,17 +154,17 @@ def test_model_access_inference_profile(model_id: str):
                     # Extract and print the response text.
                     response_text = response["output"]["message"]["content"][0]["text"]
                     print(f"Invoke response {response_text}")
-                    print(f"✅ Invoke {model_id} OK")
-                    return True
+                    print(f"✅ Invoke {inference_profile_id} OK")
+                    return inference_profile_id
 
                 except ClientError as e:
                     error_msg = e.response.get('Error', {})
                     print (f"❌ Bedrock Runtime access with inference profile: {error_msg}")
-                    return False
+                    return None
                 
     except Exception as e:
         print(f"❌ Bedrock Runtime test failed: {e}")
-        return False
+        return None
     
 def get_inference_profiles():
     """Get available Bedrock inference profiles."""
