@@ -6,27 +6,29 @@ Test script to find working Claude model identifiers in AWS Bedrock.
 import os
 import sys
 from src.services.bedrock_agent_service import BedrockAgentService
+from src.utils.config import load_config
 
+
+# Load configuration
+config = load_config()
+        
+aws_region = config.get('bedrock_region', 'us-east-1')
+model_name = config.get('bedrock_model_id', 'anthropic.claude-sonnet-4-20250514-v1:0')
+        
+# Fallback models to try if the primary model fails (based on available models)
+fallback_model = config.get('bedrock_fallback_model_id', 'anthropic.claude-3-7-sonnet-20250219-v1:0')
+        
 # List of Claude model identifiers to test (from most recent to older)
 CLAUDE_MODELS_TO_TEST = [
-    # Claude 4 and 3.7 Sonnet (cross-region inference)
-    'us.anthropic.claude-sonnet-4-20250514-v1:0',  # Claude 4 Sonnet (cross-region)
-    'us.anthropic.claude-3-7-sonnet-20250219-v1:0',  # Claude 3.7 Sonnet (cross-region)
-    
-    # Regional models (without us. prefix)
-    'anthropic.claude-sonnet-4-20250514-v1:0',  # Claude 4 Sonnet (regional)
-    'anthropic.claude-3-7-sonnet-20250219-v1:0',  # Claude 3.7 Sonnet (regional)
-    
-    # Claude 3.5 Sonnet variants (fallback)
-    'anthropic.claude-3-5-sonnet-20241022-v2:0',
-    'anthropic.claude-3-5-sonnet-20240620-v1:0',
+    model_name,
+    fallback_model
 ]
 
-def test_model(model_id: str) -> bool:
+def test_model(model_id: str, aws_region: str) -> bool:
     """Test if a model identifier works."""
     try:
         print(f"Testing model: {model_id}")
-        service = BedrockAgentService(model_name=model_id)
+        service = BedrockAgentService(model_name=model_id, region_name=aws_region)
         
         # Test connection
         success = service.test_connection()
@@ -49,7 +51,7 @@ def main():
     working_models = []
     
     for model_id in CLAUDE_MODELS_TO_TEST:
-        if test_model(model_id):
+        if test_model(model_id, aws_region):
             working_models.append(model_id)
         print("-" * 40)
     

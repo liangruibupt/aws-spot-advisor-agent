@@ -63,16 +63,20 @@ class BedrockAgentService:
         config = load_config()
         
         self.region_name = region_name or config.get('bedrock_region', 'us-east-1')
-        self.model_name = model_name or config.get('bedrock_model_id', 'anthropic.claude-4-sonnet-20241022-v1:0')
+        self.model_name = model_name or config.get('bedrock_model_id', 'anthropic.claude-sonnet-4-20250514-v1:0')
         
-        # Fallback models to try if the primary model fails
+        # Fallback models from configuration and additional backups
+        primary_fallback = config.get('bedrock_fallback_model_id', 'anthropic.claude-3-7-sonnet-20250219-v1:0')
         self.fallback_models = [
-            'anthropic.claude-4-sonnet-20241022-v1:0',
-            'anthropic.claude-3-7-sonnet-20241022-v1:0', 
-            'anthropic.claude-3-5-sonnet-20241022-v2:0',
-            'anthropic.claude-3-5-sonnet-20240620-v1:0',
-            'anthropic.claude-3-sonnet-20240229-v1:0'
+            primary_fallback,  # Configured fallback model
+            'anthropic.claude-3-5-sonnet-20241022-v2:0',  # Claude 3.5 Sonnet v2
+            'anthropic.claude-3-5-sonnet-20240620-v1:0',  # Claude 3.5 Sonnet
+            'anthropic.claude-3-sonnet-20240229-v1:0'     # Claude 3 Sonnet (stable fallback)
         ]
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        self.fallback_models = [x for x in self.fallback_models if not (x in seen or seen.add(x))]
         
         # Initialize Strands agent
         self._agent: Optional[Agent] = None

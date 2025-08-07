@@ -231,7 +231,8 @@ export LOG_LEVEL=DEBUG                # DEBUG, INFO, WARNING, ERROR (default: IN
 export AWS_DEFAULT_REGION=eu-west-1   # Default AWS region (default: us-east-1)
 
 # Bedrock model settings
-export BEDROCK_MODEL_ID=us.anthropic.claude-3-7-sonnet-20250219-v1:0  # Claude model to use
+export BEDROCK_MODEL_ID=anthropic.claude-sonnet-4-20250514-v1:0        # Primary Claude model
+export BEDROCK_FALLBACK_MODEL_ID=anthropic.claude-3-7-sonnet-20250219-v1:0  # Fallback model
 export BEDROCK_REGION=us-east-1       # Bedrock region (default: us-east-1)
 ```
 
@@ -239,10 +240,22 @@ export BEDROCK_REGION=us-east-1       # Bedrock region (default: us-east-1)
 
 The system supports the latest Claude models:
 
-- **Claude 4 Sonnet** (recommended): `us.anthropic.claude-sonnet-4-20250514-v1:0`
-- **Claude 3.7 Sonnet**: `us.anthropic.claude-3-7-sonnet-20250219-v1:0`
+- **Claude 4 Sonnet** (recommended): `anthropic.claude-sonnet-4-20250514-v1:0`
+- **Claude 3.7 Sonnet**: `anthropic.claude-3-7-sonnet-20250219-v1:0`
+- **Claude 3.5 Sonnet v2**: `anthropic.claude-3-5-sonnet-20241022-v2:0`
+- **Claude 3.5 Sonnet**: `anthropic.claude-3-5-sonnet-20240620-v1:0`
 
-**Note**: The `us.` prefix is required for cross-region inference. Make sure you have access to these models in your AWS Bedrock account.
+### Model Fallback System
+
+The system includes automatic fallback functionality:
+
+1. **Primary Model**: Configured via `BEDROCK_MODEL_ID` (defaults to Claude 4 Sonnet)
+2. **Fallback Model**: Configured via `BEDROCK_FALLBACK_MODEL_ID` (defaults to Claude 3.7 Sonnet)
+3. **Additional Fallbacks**: Claude 3.5 Sonnet variants and Claude 3 Sonnet
+
+If the primary model fails, the system automatically tries the fallback models in order until one works.
+
+Make sure you have access to these models in your AWS Bedrock account.
 
 ## Advanced Usage
 

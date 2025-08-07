@@ -30,10 +30,14 @@ def load_config() -> Dict[str, Any]:
         ),
         'bedrock_model_id': os.getenv(
             'BEDROCK_MODEL_ID',
-            'us.anthropic.claude-sonnet-4-20250514-v1:0'  # Claude 4 Sonnet (cross-region inference)
-            # Alternative: 'us.anthropic.claude-3-7-sonnet-20250219-v1:0' for Claude 3.7
+            'anthropic.claude-sonnet-4-20250514-v1:0'  # Claude 4 Sonnet (latest)
+            # Alternative: 'anthropic.claude-3-7-sonnet-20250219-v1:0' for Claude 3.7
         ),
         'bedrock_region': os.getenv('BEDROCK_REGION', 'us-east-1'),
+        'bedrock_fallback_model_id': os.getenv(
+            'BEDROCK_FALLBACK_MODEL_ID',
+            'anthropic.claude-3-7-sonnet-20250219-v1:0'  # Claude 3.7 Sonnet
+        )
     }
     
     return config
