@@ -115,6 +115,8 @@ def test_browser_interactions():
         The interruption rates should be visual bars with text like "10-15%" or ">20%".
         
         Return exactly what you see in the table.
+        
+        Then repeat for Region "Europe (Spain)" and "Asia Pacific (Jakarta).
         """)
         
         print(f"📄 LocalChromiumBrowser Response:")
