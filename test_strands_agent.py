@@ -38,8 +38,10 @@ def test_strands_agent():
             
             print(f"   ✅ Agent created successfully")
             
-            # Test simple call
-            response = agent("Make a GET request to https://aws.amazon.com/ec2/spot/instance-advisor/ and show me the response")
+            # Test http_request tool with a simple URL first
+            print("   🌐 Testing http_request tool with simple URL...")
+            test_url = "https://aws.amazon.com/ec2/spot/instance-advisor/"
+            response = agent(f"Use the http_request tool to fetch content from {test_url} and show me what you get.")
             
             print(f"   Response type: {type(response)}")
             print(f"   Response: {response}")
@@ -54,11 +56,34 @@ def test_strands_agent():
                         if isinstance(item, dict) and 'text' in item:
                             response_text += item['text']
                 
-                if "successful" in response_text.lower():
-                    print(f"   ✅ SUCCESS: {model_id} works with Strands Agent!")
+                print(f"   📄 Response text ({len(response_text)} chars):")
+                print("   " + "-" * 50)
+                print("   " + response_text[:500] + ("..." if len(response_text) > 500 else ""))
+                print("   " + "-" * 50)
+                
+                # Check if the tool was actually used
+                if "httpbin" in response_text.lower() or "json" in response_text.lower():
+                    print(f"   ✅ SUCCESS: {model_id} successfully used http_request tool!")
+                    
+                    # Now test with AWS Spot Advisor
+                    print("   🌐 Testing with AWS Spot Advisor URL...")
+                    aws_response = agent("Use the http_request tool to fetch https://aws.amazon.com/ec2/spot/instance-advisor/ and extract any pricing data you find.")
+                    
+                    if aws_response and hasattr(aws_response, 'message'):
+                        aws_text = ""
+                        if isinstance(aws_response.message, dict) and 'content' in aws_response.message:
+                            for item in aws_response.message['content']:
+                                if isinstance(item, dict) and 'text' in item:
+                                    aws_text += item['text']
+                        
+                        print(f"   📄 AWS response ({len(aws_text)} chars):")
+                        print("   " + "-" * 50)
+                        print("   " + aws_text[:500] + ("..." if len(aws_text) > 500 else ""))
+                        print("   " + "-" * 50)
+                    
                     return model_id
                 else:
-                    print(f"   ⚠️  Response doesn't contain 'successful': {response_text[:100]}...")
+                    print(f"   ⚠️  Tool doesn't seem to be working properly")
             else:
                 print(f"   ⚠️  No message in response")
                 

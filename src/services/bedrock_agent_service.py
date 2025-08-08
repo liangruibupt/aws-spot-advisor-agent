@@ -89,6 +89,14 @@ class BedrockAgentService:
         self._scraping_instructions = """
         Please analyze the AWS EC2 Spot Instance Advisor web page content and extract spot pricing data.
         
+        IMPORTANT: If the page uses dynamic JavaScript and doesn't contain static pricing data, 
+        try to find API endpoints or data URLs that might be called by the JavaScript.
+        
+        Look for:
+        1. API endpoints in script tags or network requests
+        2. JSON data embedded in the HTML
+        3. Data attributes or hidden elements containing pricing info
+        
         For each region and instance type combination, extract:
         1. Region name (e.g., us-east-1, eu-west-1)
         2. Instance type (p5en.48xlarge or p5.48xlarge)
@@ -110,6 +118,8 @@ class BedrockAgentService:
                 }
             ]
         }
+        
+        If no pricing data is found, return an empty regions array and explain why.
         """
 
     def _get_agent(self) -> Agent:
@@ -315,12 +325,31 @@ class BedrockAgentService:
             
             # Create the prompt for the agent
             prompt = f"""
-            Please fetch the content from this URL: {url}
-            
-            Then analyze the content according to these instructions:
-            {instructions}
-            
-            Use the http_request tool to fetch the URL content first, then analyze it.
+            Use the http_request tool to fetch the raw HTML content from: {url}
+
+            After you get the HTML content, extract spot pricing data for p5en.48xlarge and p5.48xlarge instances.
+
+            Look for:
+            - Region names (like us-east-1, eu-west-1, etc.)
+            - Instance types p5en.48xlarge and p5.48xlarge
+            - Spot prices in USD
+            - Interruption rates as percentages
+
+            Return ONLY a JSON response with this format:
+            {{
+                "regions": [
+                    {{
+                        "region": "us-east-1",
+                        "instance_type": "p5en.48xlarge",
+                        "spot_price": 12.50,
+                        "currency": "USD",
+                        "interruption_rate": 0.03,
+                        "availability": true
+                    }}
+                ]
+            }}
+
+            Do not provide explanations - just the JSON data.
             """
             
             # Execute the agent with the prompt
@@ -333,12 +362,32 @@ class BedrockAgentService:
                     model_name=self.model_name
                 )
             
-            # Extract text content from the response
+            # Debug: Log the full response structure
+            logger.info(f"Agent response type: {type(response)}")
+            logger.info(f"Agent response message: {response.message}")
+            
+            # Check if there are tool results in the response
             content = ""
-            if isinstance(response.message, dict) and 'content' in response.message:
+            if hasattr(response, 'tool_results') and response.tool_results:
+                logger.info(f"Found {len(response.tool_results)} tool results")
+                for tool_result in response.tool_results:
+                    logger.info(f"Tool result: {tool_result}")
+                    if hasattr(tool_result, 'content'):
+                        content += str(tool_result.content)
+                    elif isinstance(tool_result, dict) and 'content' in tool_result:
+                        content += str(tool_result['content'])
+                    else:
+                        content += str(tool_result)
+            
+            # If no tool results, extract from message
+            if not content and isinstance(response.message, dict) and 'content' in response.message:
                 for item in response.message['content']:
                     if isinstance(item, dict) and 'text' in item:
                         content += item['text']
+            
+            # If still no content, try the raw message
+            if not content:
+                content = str(response.message)
             
             if not content:
                 raise BedrockServiceError(
