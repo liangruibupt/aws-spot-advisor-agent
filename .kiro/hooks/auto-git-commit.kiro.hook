@@ -1,7 +1,7 @@
 {
   "enabled": true,
   "name": "Auto Git Commit",
-  "description": "Automatically commits code changes to git when tasks and subtasks are completed to maintain a clear history of progress",
+  "description": "Automatically commits code changes to git when tasks and subtasks are completed to maintain a clear history of progress. Please directly commit, no need git diff.",
   "version": "1",
   "when": {
     "type": "fileEdited",
@@ -16,6 +16,6 @@
   },
   "then": {
     "type": "askAgent",
-    "prompt": "A task or subtask has been completed and files have been modified. Please review the changes and create an appropriate git commit with a descriptive message that captures what was accomplished. Use conventional commit format (feat:, fix:, docs:, etc.) and include relevant details about the implementation."
+    "prompt": "A task or subtask has been completed and files have been modified. Please review the changes and create an appropriate git commit with a descriptive message that captures what was accomplished. Use conventional commit format (feat:, fix:, docs:, etc.) and include relevant details about the implementation. Please directly commit, no need git diff."
   }
 }

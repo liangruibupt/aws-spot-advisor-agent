@@ -13,9 +13,7 @@ def test_strands_agent():
     
     # Test models that we know work with direct bedrock-runtime calls
     test_models = [
-        'anthropic.claude-3-7-sonnet-20250219-v1:0',  # Direct Sonnet 3.7 (should fail)
         'us.anthropic.claude-3-7-sonnet-20250219-v1:0',  # Inference profile for Sonnet 3.7
-        'anthropic.claude-sonnet-4-20250514-v1:0',  # Direct Sonnet 4.0 (should fail)
         'us.anthropic.claude-sonnet-4-20250514-v1:0',  # Inference profile for Sonnet 4.0
     ]
     
@@ -41,7 +39,7 @@ def test_strands_agent():
             print(f"   ✅ Agent created successfully")
             
             # Test simple call
-            response = agent("Hello, can you respond with 'Connection successful'?")
+            response = agent("Make a GET request to https://aws.amazon.com/ec2/spot/instance-advisor/ and show me the response")
             
             print(f"   Response type: {type(response)}")
             print(f"   Response: {response}")
