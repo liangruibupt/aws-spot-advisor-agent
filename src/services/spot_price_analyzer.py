@@ -10,9 +10,11 @@ from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
 from src.models.spot_data import RawSpotData, SpotPriceResult, AnalysisResponse
-from src.services.web_scraper_service import WebScraperService, WebScraperServiceError
+from src.services.aws_spot_price_service import AwsSpotPriceService, AwsSpotPriceServiceError
 from src.services.data_filter_service import DataFilterService, DataFilterServiceError
 from src.services.ranking_engine import RankingEngine
+# Keep old imports for backward compatibility
+from src.services.web_scraper_service import WebScraperService, WebScraperServiceError
 from src.services.bedrock_agent_service import BedrockAgentService, BedrockAgentServiceError
 from src.services.result_formatter import ResultFormatter
 from src.utils.exceptions import (
@@ -66,28 +68,36 @@ class SpotPriceAnalyzer:
 
     def __init__(
         self,
-        web_scraper: Optional[WebScraperService] = None,
+        aws_spot_service: Optional[AwsSpotPriceService] = None,
         data_filter: Optional[DataFilterService] = None,
         ranking_engine: Optional[RankingEngine] = None,
-        bedrock_service: Optional[BedrockAgentService] = None,
-        result_formatter: Optional[ResultFormatter] = None
+        result_formatter: Optional[ResultFormatter] = None,
+        # Keep old parameters for backward compatibility
+        web_scraper: Optional[WebScraperService] = None,
+        bedrock_service: Optional[BedrockAgentService] = None
     ):
         """
         Initialize the Spot Price Analyzer.
         
         Args:
-            web_scraper: WebScraperService instance (optional, will create if None)
+            aws_spot_service: AwsSpotPriceService instance (optional, will create if None)
             data_filter: DataFilterService instance (optional, will create if None)
             ranking_engine: RankingEngine instance (optional, will create if None)
-            bedrock_service: BedrockAgentService instance (optional, will create if None)
             result_formatter: ResultFormatter instance (optional, will create if None)
+            web_scraper: WebScraperService instance (deprecated, for backward compatibility)
+            bedrock_service: BedrockAgentService instance (deprecated, for backward compatibility)
         """
         # Initialize services with dependency injection support
-        self.bedrock_service = bedrock_service or BedrockAgentService()
-        self.web_scraper = web_scraper or WebScraperService(self.bedrock_service)
+        self.aws_spot_service = aws_spot_service or AwsSpotPriceService()
         self.data_filter = data_filter or DataFilterService()
         self.ranking_engine = ranking_engine or RankingEngine()
         self.result_formatter = result_formatter or ResultFormatter()
+        
+        # Keep old services for backward compatibility (but prefer new AWS API service)
+        if web_scraper is not None or bedrock_service is not None:
+            logger.warning("web_scraper and bedrock_service parameters are deprecated. Using AWS API service instead.")
+        self.bedrock_service = bedrock_service or BedrockAgentService()
+        self.web_scraper = web_scraper or WebScraperService(self.bedrock_service)
         
         # Initialize error response formatter
         self.error_formatter = ErrorResponseFormatter()
@@ -139,8 +149,8 @@ class SpotPriceAnalyzer:
         )
         
         try:
-            # Step 1: Scrape spot pricing data
-            raw_data = self._scrape_spot_data(instance_types, force_refresh)
+            # Step 1: Get spot pricing data from AWS API
+            raw_data = self._get_spot_data_from_aws(instance_types)
             
             # Step 2: Filter and validate data
             filtered_data = self._filter_data(raw_data, max_interruption_rate)
@@ -166,10 +176,21 @@ class SpotPriceAnalyzer:
             
             return response
             
-        except (WebScraperServiceError, BedrockAgentServiceError) as e:
-            logger.error(f"Service failure during analysis: {e}")
+        except AwsSpotPriceServiceError as e:
+            logger.error(f"AWS Spot Price Service failure during analysis: {e}")
             raise ServiceFailureError(
-                message=f"Web scraping service failed: {e}",
+                message=f"AWS Spot Price Service failed: {e}",
+                details={
+                    "service": "aws_spot_price_service",
+                    "instance_types": instance_types
+                },
+                original_error=e
+            )
+        
+        except (WebScraperServiceError, BedrockAgentServiceError) as e:
+            logger.error(f"Legacy service failure during analysis: {e}")
+            raise ServiceFailureError(
+                message=f"Legacy web scraping service failed: {e}",
                 details={
                     "service": "web_scraper",
                     "instance_types": instance_types,
@@ -217,9 +238,8 @@ class SpotPriceAnalyzer:
         Returns:
             Dictionary containing analysis configuration and status
         """
-        last_scrape_time = self.web_scraper.get_last_scrape_time(self.instance_types)
-        cache_info = self.web_scraper.get_cache_info()
         filter_stats = self.data_filter.get_filter_statistics()
+        aws_service_info = self.aws_spot_service.get_service_info()
         
         return {
             "configuration": {
@@ -227,16 +247,14 @@ class SpotPriceAnalyzer:
                 "max_interruption_rate": self.max_interruption_rate,
                 "max_interruption_rate_percentage": f"{self.max_interruption_rate * 100:.1f}%"
             },
-            "cache_status": {
-                "last_scrape_time": last_scrape_time.isoformat() if last_scrape_time else None,
-                "cache_entries": cache_info.get("cache_entries", 0),
-                "cache_ttl_seconds": cache_info.get("cache_ttl_seconds", 0)
-            },
+            "data_source": aws_service_info,
             "last_filter_statistics": filter_stats,
             "services_initialized": {
-                "web_scraper": self.web_scraper is not None,
+                "aws_spot_service": self.aws_spot_service is not None,
                 "data_filter": self.data_filter is not None,
                 "ranking_engine": self.ranking_engine is not None,
+                # Legacy services (deprecated)
+                "web_scraper": self.web_scraper is not None,
                 "bedrock_service": self.bedrock_service is not None
             }
         }
@@ -267,15 +285,20 @@ class SpotPriceAnalyzer:
                     )
                 
                 # Validate instance types are supported
-                supported_types = self.web_scraper.get_supported_instance_types()
+                supported_types = self.aws_spot_service.get_supported_instance_types()
                 invalid_types = [t for t in instance_types if t not in supported_types]
                 if invalid_types:
-                    raise ConfigurationError(
-                        message=f"Unsupported instance types: {invalid_types}",
-                        config_key="instance_types",
-                        config_value=invalid_types,
-                        expected_type="supported instance types"
-                    )
+                    # Check if they exist in AWS (more permissive than supported list)
+                    existence_check = self.aws_spot_service.check_instance_types_exist(invalid_types)
+                    truly_invalid = [t for t, exists in existence_check.items() if not exists]
+                    
+                    if truly_invalid:
+                        raise ConfigurationError(
+                            message=f"Instance types do not exist in AWS: {truly_invalid}",
+                            config_key="instance_types",
+                            config_value=truly_invalid,
+                            expected_type="valid AWS instance types"
+                        )
                 
                 self.instance_types = instance_types.copy()
                 logger.info(f"Updated instance types: {self.instance_types}")
@@ -304,9 +327,53 @@ class SpotPriceAnalyzer:
 
     def clear_cache(self) -> None:
         """Clear all cached data."""
-        self.web_scraper.clear_cache()
+        # Clear filter statistics (AWS service doesn't have cache to clear)
         self.data_filter.clear_statistics()
+        # Clear legacy cache if using old services
+        if hasattr(self, 'web_scraper') and self.web_scraper:
+            self.web_scraper.clear_cache()
         logger.info("All caches cleared")
+
+    def _get_spot_data_from_aws(self, instance_types: List[str]) -> List[RawSpotData]:
+        """
+        Get spot pricing data using the AWS API service.
+        
+        Args:
+            instance_types: List of instance types to get data for
+            
+        Returns:
+            List of RawSpotData objects
+            
+        Raises:
+            ServiceFailureError: If AWS API call fails
+        """
+        try:
+            logger.info(f"Getting spot data from AWS API for {len(instance_types)} instance types")
+            
+            raw_data = self.aws_spot_service.get_spot_prices(instance_types=instance_types)
+            
+            if not raw_data:
+                raise ServiceFailureError(
+                    message="No spot data retrieved from AWS API",
+                    details={
+                        "instance_types": instance_types,
+                        "service": "aws_spot_price_service"
+                    }
+                )
+            
+            logger.info(f"Successfully retrieved {len(raw_data)} spot price records from AWS API")
+            return raw_data
+            
+        except AwsSpotPriceServiceError as e:
+            logger.error(f"AWS API call failed: {e}")
+            raise ServiceFailureError(
+                message=f"Failed to get spot data from AWS API: {e}",
+                details={
+                    "service": "aws_spot_price_service",
+                    "instance_types": instance_types
+                },
+                original_error=e
+            )
 
     def _scrape_spot_data(self, instance_types: List[str], force_refresh: bool) -> List[RawSpotData]:
         """
@@ -500,7 +567,7 @@ class SpotPriceAnalyzer:
         Returns:
             List of supported instance type strings
         """
-        return self.web_scraper.get_supported_instance_types()
+        return self.aws_spot_service.get_supported_instance_types()
 
     def validate_instance_types(self, instance_types: List[str]) -> Dict[str, List[str]]:
         """
