@@ -24,9 +24,11 @@ This feature will create an AWS spot price analyzer that identifies the top 3 AW
 #### Acceptance Criteria
 
 1. WHEN fetching pricing data THEN the system SHALL access the AWS EC2 Spot Instance Advisor web page at https://aws.amazon.com/ec2/spot/instance-advisor/
-2. WHEN retrieving data THEN the system SHALL use AWS Bedrock AgentCore to process the web content
-3. WHEN data is older than 1 hour THEN the system SHALL refresh the data automatically
-4. IF the web page is unavailable THEN the system SHALL return an appropriate error message
+2. Use the Bedrock Claude LLM model computer user or bowser user to access the https://aws.amazon.com/ec2/spot/instance-advisor/ to get 1) the region with Hightest 'Savings over On-Demand' percentage as the most cost effective region 2) the region with lower 'Frequency of interruption' which can meet interruption rates below 5%. 5% should be max_interruption_rate.
+3. WHEN retrieving data THEN the system SHALL use AWS Bedrock AgentCore implement the code logic
+4. WHEN data is older than 1 hour THEN the system SHALL refresh the data automatically
+5. IF the web page is unavailable THEN the system SHALL return an appropriate error message
+
 
 ### Requirement 3
 

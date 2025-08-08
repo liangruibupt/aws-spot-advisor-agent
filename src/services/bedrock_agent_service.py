@@ -18,6 +18,7 @@ from strands import Agent
 from strands.models.bedrock import BedrockModel
 from strands.agent.agent_result import AgentResult
 from strands_tools.http_request import http_request, extract_content_from_html
+from strands_tools.browser import LocalChromiumBrowser
 
 from src.models.spot_data import RawSpotData
 from src.utils.exceptions import (
@@ -82,8 +83,9 @@ class BedrockAgentService:
         seen = set()
         self.fallback_models = [x for x in self.fallback_models if not (x in seen or seen.add(x))]
         
-        # Initialize Strands agent
+        # Initialize Strands agent and browser
         self._agent: Optional[Agent] = None
+        self._browser: Optional[LocalChromiumBrowser] = None
         
         # Web scraping instructions template
         self._scraping_instructions = """
@@ -141,10 +143,14 @@ class BedrockAgentService:
                         temperature=0.3,
                     )
                     
-                    # Create agent with Bedrock model
+                    # Create browser instance
+                    if self._browser is None:
+                        self._browser = LocalChromiumBrowser()
+                    
+                    # Create agent with Bedrock model and browser tool for dynamic content
                     self._agent = Agent(
                         model=bedrock_model,
-                        tools=[http_request],
+                        tools=[http_request, self._browser.browser],  # Use .browser method as tool
                         callback_handler=None  # Disable default callback handler
                     )
                     
@@ -178,7 +184,7 @@ class BedrockAgentService:
                                 
                                 self._agent = Agent(
                                     model=bedrock_model,
-                                    tools=[http_request],
+                                    tools=[http_request, browser],  # Include browser tool for dynamic web apps
                                     callback_handler=None  # Disable default callback handler
                                 )
                                 logger.info(f"Successfully initialized with inference profile: {inference_profile_id}")

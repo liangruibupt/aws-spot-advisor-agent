@@ -13,9 +13,9 @@ from src.models.spot_data import RawSpotData, SpotPriceResult, AnalysisResponse
 from src.services.aws_spot_price_service import AwsSpotPriceService, AwsSpotPriceServiceError
 from src.services.data_filter_service import DataFilterService, DataFilterServiceError
 from src.services.ranking_engine import RankingEngine
+from src.services.bedrock_agent_service import BedrockAgentService, BedrockAgentServiceError
 # Keep old imports for backward compatibility
 from src.services.web_scraper_service import WebScraperService, WebScraperServiceError
-from src.services.bedrock_agent_service import BedrockAgentService, BedrockAgentServiceError
 from src.services.result_formatter import ResultFormatter
 from src.utils.exceptions import (
     SpotAnalyzerBaseError,
@@ -60,8 +60,8 @@ class SpotPriceAnalyzer:
     # Default instance types to analyze
     DEFAULT_INSTANCE_TYPES = ["p5en.48xlarge", "p5.48xlarge"]
     
-    # Default maximum interruption rate (5%)
-    DEFAULT_MAX_INTERRUPTION_RATE = 0.05
+    # Default maximum interruption rate (30% - increased to accommodate P5 instances)
+    DEFAULT_MAX_INTERRUPTION_RATE = 0.30
     
     # Minimum number of regions required for analysis
     MIN_REGIONS_REQUIRED = 1
@@ -69,34 +69,34 @@ class SpotPriceAnalyzer:
     def __init__(
         self,
         aws_spot_service: Optional[AwsSpotPriceService] = None,
+        bedrock_service: Optional[BedrockAgentService] = None,
         data_filter: Optional[DataFilterService] = None,
         ranking_engine: Optional[RankingEngine] = None,
         result_formatter: Optional[ResultFormatter] = None,
         # Keep old parameters for backward compatibility
-        web_scraper: Optional[WebScraperService] = None,
-        bedrock_service: Optional[BedrockAgentService] = None
+        web_scraper: Optional[WebScraperService] = None
     ):
         """
         Initialize the Spot Price Analyzer.
         
         Args:
             aws_spot_service: AwsSpotPriceService instance (optional, will create if None)
+            bedrock_service: BedrockAgentService for web scraping interruption rates (optional)
             data_filter: DataFilterService instance (optional, will create if None)
             ranking_engine: RankingEngine instance (optional, will create if None)
             result_formatter: ResultFormatter instance (optional, will create if None)
             web_scraper: WebScraperService instance (deprecated, for backward compatibility)
-            bedrock_service: BedrockAgentService instance (deprecated, for backward compatibility)
         """
         # Initialize services with dependency injection support
-        self.aws_spot_service = aws_spot_service or AwsSpotPriceService()
+        self.bedrock_service = bedrock_service or BedrockAgentService()
+        self.aws_spot_service = aws_spot_service or AwsSpotPriceService(bedrock_service=self.bedrock_service)
         self.data_filter = data_filter or DataFilterService()
         self.ranking_engine = ranking_engine or RankingEngine()
         self.result_formatter = result_formatter or ResultFormatter()
         
-        # Keep old services for backward compatibility (but prefer new AWS API service)
-        if web_scraper is not None or bedrock_service is not None:
-            logger.warning("web_scraper and bedrock_service parameters are deprecated. Using AWS API service instead.")
-        self.bedrock_service = bedrock_service or BedrockAgentService()
+        # Keep old services for backward compatibility
+        if web_scraper is not None:
+            logger.warning("web_scraper parameter is deprecated. Using hybrid AWS API + Bedrock agent approach.")
         self.web_scraper = web_scraper or WebScraperService(self.bedrock_service)
         
         # Initialize error response formatter
@@ -679,7 +679,7 @@ class SpotPriceAnalyzer:
             ]
         
         if max_interruption_rates is None:
-            max_interruption_rates = [self.max_interruption_rate, 0.03, 0.10]  # 5%, 3%, 10%
+            max_interruption_rates = [self.max_interruption_rate, 0.10, 0.15, 0.25]  # 25%, 10%, 15%, 25%
         
         if top_counts is None:
             top_counts = [3, 5, 10]
