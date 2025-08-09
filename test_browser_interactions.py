@@ -7,7 +7,7 @@ import boto3
 from strands import Agent
 from strands.models.bedrock import BedrockModel
 
-def test_browser_interactions():
+def test_browser_interactions_AgentCoreBrowser():
     """Test browser interactions with AWS Spot Instance Advisor page."""
     
     print("🔍 Testing browser interactions with AWS Spot Instance Advisor...")
@@ -46,7 +46,7 @@ def test_browser_interactions():
         3. Verify the Region dropdown shows "US East (N. Virginia)"
         4. Verify the OS dropdown shows "Linux"  
         5. In the search box (with magnifying glass icon), type "p5"
-        6. Wait for the results to filter and show "2 matches"
+        6. Wait for the results to filter and show "2 matches" or "1 matches" or "0 matches"
         7. Look at the results table with columns:
            - Instance Type
            - vCPU
@@ -69,6 +69,10 @@ def test_browser_interactions():
             }
         }
         
+        Then repeat step 3 to step 5 actions for Region "Europe (Spain)" and "Asia Pacific (Jakarta).
+        
+        Consolidate all the result together.
+        
         CRITICAL: Use the browser tool to actually interact with the page elements.
         """)
         
@@ -79,6 +83,20 @@ def test_browser_interactions():
         print(f"❌ AgentCoreBrowser failed: {e}")
         import traceback
         traceback.print_exc()
+    
+
+def test_browser_interactions_LocalChromiumBrowser():
+    """Test browser interactions with AWS Spot Instance Advisor page."""
+    
+    print("🔍 Testing browser interactions with AWS Spot Instance Advisor...")
+    
+    # Create Bedrock model
+    session = boto3.Session()
+    bedrock_model = BedrockModel(
+        model_id="us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        boto_session=session,
+        temperature=0.1,
+    )
     
     try:
         # Method 2: Test LocalChromiumBrowser
@@ -107,16 +125,28 @@ def test_browser_interactions():
         4. Check that OS is set to "Linux"
         5. Click on the search box (with magnifying glass icon)
         6. Type "p5" in the search box
-        7. Wait for the table to filter and show results
+        7. Wait for the table to filter and show results, it can be "2 matches" or "1 matches" or "0 matches"
         8. Read the table data for both P5 instances:
            - p5en.48xlarge row: get "Savings over On-Demand" and "Frequency of interruption"
            - p5.48xlarge row: get "Savings over On-Demand" and "Frequency of interruption"
         
-        The interruption rates should be visual bars with text like "10-15%" or ">20%".
+        The interruption rates should be visual bars with text like "10-15%" or ">20%" or "<5%"
         
-        Return exactly what you see in the table.
+        Return the data in this format:
+        {
+            "p5en.48xlarge": {
+                "savings_over_ondemand": "XX%",
+                "frequency_of_interruption": "XX-XX%" or ">XX%"
+            },
+            "p5.48xlarge": {
+                "savings_over_ondemand": "XX%", 
+                "frequency_of_interruption": "XX-XX%" or ">XX%"
+            }
+        }
         
-        Then repeat for Region "Europe (Spain)" and "Asia Pacific (Jakarta).
+        Then repeat step 3 to step 5 actions for Region "Europe (Spain)" and "Asia Pacific (Jakarta).
+        
+        Consolidate all the result together.
         """)
         
         print(f"📄 LocalChromiumBrowser Response:")
@@ -128,4 +158,5 @@ def test_browser_interactions():
         traceback.print_exc()
 
 if __name__ == "__main__":
-    test_browser_interactions()
+    test_browser_interactions_AgentCoreBrowser()
+    test_browser_interactions_LocalChromiumBrowser()

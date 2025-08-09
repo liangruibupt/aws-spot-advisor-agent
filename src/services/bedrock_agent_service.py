@@ -18,7 +18,7 @@ from strands import Agent
 from strands.models.bedrock import BedrockModel
 from strands.agent.agent_result import AgentResult
 from strands_tools.http_request import http_request, extract_content_from_html
-from strands_tools.browser import LocalChromiumBrowser
+from strands_tools.browser.agent_core_browser import AgentCoreBrowser
 
 from src.models.spot_data import RawSpotData
 from src.utils.exceptions import (
@@ -85,29 +85,39 @@ class BedrockAgentService:
         
         # Initialize Strands agent and browser
         self._agent: Optional[Agent] = None
-        self._browser: Optional[LocalChromiumBrowser] = None
+        self._browser: Optional[AgentCoreBrowser] = None
         
-        # Web scraping instructions template
+        # Web scraping instructions template for browser-based interaction
         self._scraping_instructions = """
-        Please analyze the AWS EC2 Spot Instance Advisor web page content and extract spot pricing data.
+        Use the browser tool to interact with the AWS EC2 Spot Instance Advisor page.
         
-        IMPORTANT: If the page uses dynamic JavaScript and doesn't contain static pricing data, 
-        try to find API endpoints or data URLs that might be called by the JavaScript.
+        STEP-BY-STEP BROWSER INTERACTION:
+        1. Navigate to the URL using the browser tool
+        2. Wait for the dynamic web application to fully load
+        3. Verify the default settings:
+           - Region dropdown should show "US East (N. Virginia)"
+           - OS dropdown should show "Linux"
+        4. Use the search functionality:
+           - Click on the search box (with magnifying glass icon)
+           - Type "p5" to filter for P5 instances
+           - Wait for the results to update
+        5. Extract data from the results table:
+           - Look for columns: Instance Type, Savings over On-Demand, Frequency of interruption
+           - Find rows for p5en.48xlarge and p5.48xlarge
+           - Extract exact values shown (don't estimate)
+        6. Repeat for multiple regions:
+           - Change region dropdown to "Europe (Spain)"
+           - Extract the same data
+           - Change region dropdown to "Asia Pacific (Jakarta)"
+           - Extract the same data
         
-        Look for:
-        1. API endpoints in script tags or network requests
-        2. JSON data embedded in the HTML
-        3. Data attributes or hidden elements containing pricing info
+        CRITICAL REQUIREMENTS:
+        - Use actual browser interactions, not HTML parsing
+        - Extract exact values from the live page
+        - Handle dynamic content loading properly
+        - Return structured JSON data with all regions
         
-        For each region and instance type combination, extract:
-        1. Region name (e.g., us-east-1, eu-west-1)
-        2. Instance type (p5en.48xlarge or p5.48xlarge)
-        3. Current spot price in USD
-        4. Interruption rate as a percentage
-        5. Availability status
-        
-        Focus specifically on p5en.48xlarge and p5.48xlarge instance types.
-        Return the data in a structured JSON format with the following schema:
+        Expected JSON format:
         {
             "regions": [
                 {
@@ -116,12 +126,11 @@ class BedrockAgentService:
                     "spot_price": 12.50,
                     "currency": "USD",
                     "interruption_rate": 0.03,
-                    "availability": true
+                    "availability": true,
+                    "savings_over_ondemand": "XX%"
                 }
             ]
         }
-        
-        If no pricing data is found, return an empty regions array and explain why.
         """
 
     def _get_agent(self) -> Agent:
@@ -145,12 +154,12 @@ class BedrockAgentService:
                     
                     # Create browser instance
                     if self._browser is None:
-                        self._browser = LocalChromiumBrowser()
+                        self._browser = AgentCoreBrowser()
                     
                     # Create agent with Bedrock model and browser tool for dynamic content
                     self._agent = Agent(
                         model=bedrock_model,
-                        tools=[http_request, self._browser.browser],  # Use .browser method as tool
+                        tools=[self._browser.browser],  # Use .browser method as tool
                         callback_handler=None  # Disable default callback handler
                     )
                     
@@ -182,9 +191,13 @@ class BedrockAgentService:
                                     temperature=0.3,
                                 )
                                 
+                                # Create browser instance for inference profile
+                                if self._browser is None:
+                                    self._browser = AgentCoreBrowser()
+                                
                                 self._agent = Agent(
                                     model=bedrock_model,
-                                    tools=[http_request, browser],  # Include browser tool for dynamic web apps
+                                    tools=[self._browser.browser],  # Include browser tool for dynamic web apps
                                     callback_handler=None  # Disable default callback handler
                                 )
                                 logger.info(f"Successfully initialized with inference profile: {inference_profile_id}")
@@ -329,19 +342,32 @@ class BedrockAgentService:
             # Get the Strands agent
             agent = self._get_agent()
             
-            # Create the prompt for the agent
+            # Create the prompt for the agent using browser tool approach
             prompt = f"""
-            Use the http_request tool to fetch the raw HTML content from: {url}
-
-            After you get the HTML content, extract spot pricing data for p5en.48xlarge and p5.48xlarge instances.
-
-            Look for:
-            - Region names (like us-east-1, eu-west-1, etc.)
-            - Instance types p5en.48xlarge and p5.48xlarge
-            - Spot prices in USD
-            - Interruption rates as percentages
-
-            Return ONLY a JSON response with this format:
+            Use the browser tool to interact with {url}
+            
+            DETAILED STEPS:
+            1. Navigate to the URL
+            2. Wait for the page to fully load (it's a dynamic web application)
+            3. Verify the Region dropdown shows "US East (N. Virginia)" by default
+            4. Verify the OS dropdown shows "Linux" by default
+            5. In the search box (with magnifying glass icon), type "p5"
+            6. Wait for the results to filter and show matches
+            7. Look at the results table with columns:
+               - Instance Type
+               - vCPU
+               - Memory GiB
+               - Savings over On-Demand
+               - Frequency of interruption
+            8. Extract the EXACT data for both instance types:
+               - p5en.48xlarge: Savings % and Interruption rate
+               - p5.48xlarge: Savings % and Interruption rate
+            
+            Then repeat for other regions:
+            - Change region to "Europe (Spain)" and extract the same data
+            - Change region to "Asia Pacific (Jakarta)" and extract the same data
+            
+            Return the data in JSON format:
             {{
                 "regions": [
                     {{
@@ -350,12 +376,23 @@ class BedrockAgentService:
                         "spot_price": 12.50,
                         "currency": "USD",
                         "interruption_rate": 0.03,
-                        "availability": true
+                        "availability": true,
+                        "savings_over_ondemand": "XX%"
+                    }},
+                    {{
+                        "region": "us-east-1", 
+                        "instance_type": "p5.48xlarge",
+                        "spot_price": 15.75,
+                        "currency": "USD",
+                        "interruption_rate": 0.05,
+                        "availability": true,
+                        "savings_over_ondemand": "XX%"
                     }}
                 ]
             }}
-
-            Do not provide explanations - just the JSON data.
+            
+            CRITICAL: Use the browser tool to actually interact with the page elements.
+            Extract the exact values shown on the page, don't estimate or make up data.
             """
             
             # Execute the agent with the prompt
@@ -671,7 +708,7 @@ class BedrockAgentService:
                 "model_name": self.model_name,
                 "region": self.region_name,
                 "framework": "Strands Agent",
-                "tools": ["http_request"]
+                "tools": ["AgentCoreBrowser"]
             }
             
         except Exception as e:
